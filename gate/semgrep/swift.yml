@@ -1,0 +1,34 @@
+# Semgrep rules for guest Swift code (guest-apps/PLAN.md section 7).
+# Each finding is a hard failure. Keep rules narrow: a false positive blocks a
+# guest who cannot read the report, so every rule names a real way an app can
+# do something it was not reviewed for.
+rules:
+  - id: guest-dynamic-library-load
+    languages: [swift]
+    severity: ERROR
+    message: Loads native code at run time (dlopen/dlsym/Bundle.load), which App Review and this gate never saw.
+    pattern-either:
+      - pattern: dlopen(...)
+      - pattern: dlsym(...)
+      - pattern-regex: '\bBundle\(\s*(path|url):[^)]*\)\??\s*\.(load|loadAndReturnError)\b'
+  - id: guest-private-api-by-name
+    languages: [swift]
+    severity: ERROR
+    message: Reaches a class or method by a string name, the usual way to call private Apple APIs.
+    pattern-either:
+      - pattern: NSClassFromString(...)
+      - pattern: NSSelectorFromString(...)
+  - id: guest-javascript-eval
+    languages: [swift]
+    severity: ERROR
+    message: Runs JavaScript text, which can come from the network and change what the app does after review.
+    pattern-either:
+      - pattern: $C.evaluateScript(...)
+      - pattern: $W.evaluateJavaScript(...)
+      - pattern: $W.callAsyncJavaScript(...)
+      - pattern: WKUserScript(...)
+  - id: guest-insecure-http
+    languages: [swift]
+    severity: ERROR
+    message: Uses plain http://, which sends data unencrypted.
+    pattern-regex: '"http://(?!localhost|127\.0\.0\.1)'

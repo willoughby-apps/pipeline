@@ -1,0 +1,401 @@
+# Check one guest commit: gate, unsigned build, simulator preview, report.
+#
+# This repo is PUBLIC, so its logs and artifacts are public. Rules every job
+# here follows (tests in the monorepo enforce the mechanical ones):
+#   - Nothing guest-written is printed: guest tools write to files, and every
+#     file that leaves a job is encrypted with age before upload-artifact.
+#   - No `${{ }}` inside a `run:` script. Values reach scripts through `env:`
+#     and are validated by the script (ci/ghapi.py validate_inputs).
+#   - The two jobs that touch guest code (build compiles it, preview runs it)
+#     have `permissions: {}` and reference no secret.
+#   - Every action is GitHub-owned and pinned by full commit SHA; no caches
+#     (a job running guest code holds the run's cache-write token, so a cache
+#     could be poisoned for later runs).
+# Design notes: README.md.
+name: check
+run-name: check ${{ inputs.repo }} ${{ inputs.kind }} ${{ inputs.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: guest repo name in willoughby-apps (e.g. sam-hello)
+        required: true
+        type: string
+      sha:
+        description: full 40-character commit SHA
+        required: true
+        type: string
+      kind:
+        description: push (report only) or tag (report + release request)
+        required: true
+        type: choice
+        options: [push, tag]
+      tag:
+        description: the v* tag, for kind=tag
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      repo: {required: true, type: string}
+      sha: {required: true, type: string}
+      kind: {required: true, type: string}
+      tag: {required: false, type: string, default: ""}
+    secrets:
+      ORG_TOKEN: {required: true}
+      PIPELINE_PRIVATE_KEY: {required: true}
+      MONOREPO_DISPATCH: {required: false}
+
+permissions: {}
+
+concurrency:
+  group: check-${{ inputs.repo }}-${{ inputs.kind }}-${{ inputs.sha }}
+  cancel-in-progress: false
+
+env:
+  REPO: ${{ inputs.repo }}
+  SHA: ${{ inputs.sha }}
+  KIND: ${{ inputs.kind }}
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  # Reads the guest repo as data and decides. Runs no guest code.
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.gate.outputs.passed }}
+      source_key: ${{ steps.handoff.outputs.source_key }}
+      source_sha256: ${{ steps.handoff.outputs.source_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate inputs
+        run: python3 -c 'import os, sys; sys.path.insert(0, "ci"); import ghapi; ghapi.validate_inputs(os.environ["REPO"], os.environ["SHA"], os.environ["KIND"], os.environ["TAG"])'
+
+      - name: Install the scanners (pinned)
+        run: |
+          ci/install_tools.sh "$RUNNER_TEMP/bin" age gitleaks osv-scanner
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet --disable-pip-version-check -r ci/requirements-gate.txt
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clamav clamav-freshclam
+          sudo systemctl stop clamav-freshclam || true
+          for _ in 1 2 3; do sudo freshclam --quiet && break; sleep 20; done
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch the guest repo as data
+        id: fetch
+        env:
+          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+        run: python3 ci/fetch_source.py "$RUNNER_TEMP/source.tar.gz"
+
+      - name: Run the gate
+        id: gate
+        env:
+          BUNDLE_ID: ${{ steps.fetch.outputs.bundle_id }}
+        run: |
+          out="$RUNNER_TEMP/out/gate"
+          mkdir -p "$out"
+          passed=false
+          if python3 ci/unpack.py "$RUNNER_TEMP/source.tar.gz" "$RUNNER_TEMP/repo" > "$RUNNER_TEMP/unpack.txt" 2>&1; then
+            if python3 -m gate check "$RUNNER_TEMP/repo" --bundle-id "$BUNDLE_ID" --json "$out/gate.json" > "$out/gate.txt" 2>&1; then
+              passed=true
+            fi
+          else
+            mv "$RUNNER_TEMP/unpack.txt" "$out/unpack.txt"
+          fi
+          echo "passed=$passed" >> "$GITHUB_OUTPUT"
+          echo "gate passed: $passed"
+
+      - name: Encrypt the gate report
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/out/gate"
+          tar -C "$RUNNER_TEMP/out" -czf - gate | age -R keys/pipeline.age.pub -o "$RUNNER_TEMP/gate-report.age"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: gate-report
+          path: ${{ runner.temp }}/gate-report.age
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # The source goes to the build job encrypted to a key made for this run
+      # only; the key travels as a job output (README.md, "Source hand-off").
+      - name: Encrypt the source for the build job
+        id: handoff
+        if: steps.gate.outputs.passed == 'true'
+        run: |
+          umask 077
+          age-keygen -o "$RUNNER_TEMP/handoff.key" 2> /dev/null
+          age -r "$(age-keygen -y "$RUNNER_TEMP/handoff.key")" -o "$RUNNER_TEMP/source.age" "$RUNNER_TEMP/source.tar.gz"
+          {
+            echo "source_key=$(grep '^AGE-SECRET-KEY-' "$RUNNER_TEMP/handoff.key")"
+            echo "source_sha256=$(shasum -a 256 "$RUNNER_TEMP/source.tar.gz" | cut -d ' ' -f 1)"
+          } >> "$GITHUB_OUTPUT"
+          rm -f "$RUNNER_TEMP/handoff.key"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.gate.outputs.passed == 'true'
+        with:
+          name: source
+          path: ${{ runner.temp }}/source.age
+          retention-days: 1
+          if-no-files-found: error
+
+  # Compiles the gated source, unsigned. No secret, no token permissions.
+  build:
+    needs: gate
+    if: needs.gate.outputs.passed == 'true'
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions: {}
+    env:
+      GUEST_CODE: compiles
+    outputs:
+      built: ${{ steps.build.outputs.built }}
+      ipa_sha256: ${{ steps.package.outputs.ipa_sha256 }}
+      sim_key: ${{ steps.package.outputs.sim_key }}
+      sim_sha256: ${{ steps.package.outputs.sim_sha256 }}
+    steps:
+      - name: Get the pipeline code (public, anonymous)
+        run: |
+          git init -q .
+          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      - name: Install tools (pinned) and select Xcode
+        run: |
+          ci/install_tools.sh "$RUNNER_TEMP/bin" age xcodegen
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: source
+          path: ${{ runner.temp }}/in
+
+      - name: Decrypt and unpack the source
+        env:
+          SOURCE_KEY: ${{ needs.gate.outputs.source_key }}
+          SOURCE_SHA256: ${{ needs.gate.outputs.source_sha256 }}
+        run: |
+          umask 077
+          printf '%s\n' "$SOURCE_KEY" > "$RUNNER_TEMP/handoff.key"
+          age -d -i "$RUNNER_TEMP/handoff.key" -o "$RUNNER_TEMP/source.tar.gz" "$RUNNER_TEMP/in/source.age"
+          rm -f "$RUNNER_TEMP/handoff.key"
+          echo "$SOURCE_SHA256  $RUNNER_TEMP/source.tar.gz" | shasum -a 256 --check --status
+          python3 ci/unpack.py "$RUNNER_TEMP/source.tar.gz" "$RUNNER_TEMP/repo" > /dev/null 2>&1
+
+      - name: Build (output to a file, never this log)
+        id: build
+        run: |
+          python3 ci/build.py "$RUNNER_TEMP/repo" "$RUNNER_TEMP/out/build"
+          built=$(python3 -c 'import json, sys; print("true" if json.load(open(sys.argv[1]))["ok"] is True else "false")' "$RUNNER_TEMP/out/build/result.json")
+          echo "built=$built" >> "$GITHUB_OUTPUT"
+
+      - name: Encrypt the build outputs
+        id: package
+        if: always()
+        run: |
+          umask 077
+          b="$RUNNER_TEMP/out/build"
+          mkdir -p "$b" "$RUNNER_TEMP/up"
+          tar -C "$RUNNER_TEMP/out" -czf - --exclude build/sim --exclude build/unsigned.ipa build \
+            | age -R keys/pipeline.age.pub -o "$RUNNER_TEMP/up/build-report.age"
+          if [ -f "$b/unsigned.ipa" ] && [ -d "$b/sim" ]; then
+            age -R keys/pipeline.age.pub -o "$RUNNER_TEMP/up/archive.age" "$b/unsigned.ipa"
+            echo "ipa_sha256=$(shasum -a 256 "$b/unsigned.ipa" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+            tar -C "$b" -czf "$RUNNER_TEMP/sim.tar.gz" sim
+            age-keygen -o "$RUNNER_TEMP/sim.key" 2> /dev/null
+            age -r "$(age-keygen -y "$RUNNER_TEMP/sim.key")" -o "$RUNNER_TEMP/up/sim-app.age" "$RUNNER_TEMP/sim.tar.gz"
+            {
+              echo "sim_key=$(grep '^AGE-SECRET-KEY-' "$RUNNER_TEMP/sim.key")"
+              echo "sim_sha256=$(shasum -a 256 "$RUNNER_TEMP/sim.tar.gz" | cut -d ' ' -f 1)"
+            } >> "$GITHUB_OUTPUT"
+            rm -f "$RUNNER_TEMP/sim.key"
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: build-report
+          path: ${{ runner.temp }}/up/build-report.age
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.build.outputs.built == 'true'
+        with:
+          name: archive
+          path: ${{ runner.temp }}/up/archive.age
+          retention-days: 7
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.build.outputs.built == 'true'
+        with:
+          name: sim-app
+          path: ${{ runner.temp }}/up/sim-app.age
+          retention-days: 1
+          if-no-files-found: error
+
+  # Launches the app in the simulator: the one place guest code runs. A
+  # separate machine from `build`, so nothing the app does can touch the
+  # archive whose digest `build` already recorded.
+  preview:
+    needs: build
+    if: needs.build.outputs.built == 'true'
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions: {}
+    env:
+      GUEST_CODE: runs
+    steps:
+      - name: Get the pipeline code (public, anonymous)
+        run: |
+          git init -q .
+          git fetch -q --depth 1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" "$GITHUB_SHA"
+          git checkout -q FETCH_HEAD
+
+      - name: Install tools (pinned) and select Xcode
+        run: |
+          ci/install_tools.sh "$RUNNER_TEMP/bin" age
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sim-app
+          path: ${{ runner.temp }}/in
+
+      - name: Decrypt the simulator build
+        env:
+          SIM_KEY: ${{ needs.build.outputs.sim_key }}
+          SIM_SHA256: ${{ needs.build.outputs.sim_sha256 }}
+        run: |
+          umask 077
+          printf '%s\n' "$SIM_KEY" > "$RUNNER_TEMP/sim.key"
+          age -d -i "$RUNNER_TEMP/sim.key" -o "$RUNNER_TEMP/sim.tar.gz" "$RUNNER_TEMP/in/sim-app.age"
+          rm -f "$RUNNER_TEMP/sim.key"
+          echo "$SIM_SHA256  $RUNNER_TEMP/sim.tar.gz" | shasum -a 256 --check --status
+          python3 ci/unpack.py "$RUNNER_TEMP/sim.tar.gz" "$RUNNER_TEMP/app" > /dev/null 2>&1
+
+      - name: Launch and screenshot (output to files)
+        run: python3 ci/preview.py "$RUNNER_TEMP/app" "$RUNNER_TEMP/out/preview"
+
+      - name: Encrypt the preview
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/out/preview"
+          tar -C "$RUNNER_TEMP/out" -czf - preview | age -R keys/pipeline.age.pub -o "$RUNNER_TEMP/preview-report.age"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: preview-report
+          path: ${{ runner.temp }}/preview-report.age
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # Decrypts the reports and writes the verdict onto the guest's commit.
+  report:
+    needs: [gate, build, preview]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      ok: ${{ steps.report.outputs.ok }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install age (pinned)
+        run: |
+          ci/install_tools.sh "$RUNNER_TEMP/bin" age
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          pattern: "*-report"
+          path: ${{ runner.temp }}/enc
+
+      - name: Decrypt the reports
+        env:
+          PIPELINE_PRIVATE_KEY: ${{ secrets.PIPELINE_PRIVATE_KEY }}
+        run: |
+          umask 077
+          if [ -z "$PIPELINE_PRIVATE_KEY" ]; then
+            echo "PIPELINE_PRIVATE_KEY is not set: add it as a secret of this repo" >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/pipeline.key"
+          printf '%s\n' "$PIPELINE_PRIVATE_KEY" > "$key"
+          mkdir -p "$RUNNER_TEMP/reports"
+          for name in gate build preview; do
+            f="$RUNNER_TEMP/enc/$name-report/$name-report.age"
+            [ -f "$f" ] || continue
+            if age -d -i "$key" -o "$RUNNER_TEMP/$name.tar.gz" "$f"; then
+              python3 ci/unpack.py "$RUNNER_TEMP/$name.tar.gz" "$RUNNER_TEMP/reports/$name" > /dev/null 2>&1 \
+                || echo "the $name report could not be unpacked"
+            else
+              echo "the $name report could not be decrypted"
+            fi
+          done
+          rm -f "$key"
+
+      - name: Report on the guest commit
+        id: report
+        env:
+          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          GATE_PASSED: ${{ needs.gate.outputs.passed }}
+          BUILT: ${{ needs.build.outputs.built }}
+          IPA_SHA256: ${{ needs.build.outputs.ipa_sha256 }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 ci/report.py "$RUNNER_TEMP/reports"
+
+      - name: Delete the one-run hand-off artifacts
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.artifacts[] | select(.name == "source" or .name == "sim-app") | .id' \
+          | while read -r id; do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+            done
+
+  # Tags only: open the release request and start the advisory review.
+  request:
+    needs: [build, report]
+    if: inputs.kind == 'tag' && needs.report.outputs.ok == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open the release request and dispatch the review
+        env:
+          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          MONOREPO_DISPATCH: ${{ secrets.MONOREPO_DISPATCH }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          IPA_SHA256: ${{ needs.build.outputs.ipa_sha256 }}
+        run: python3 ci/request.py

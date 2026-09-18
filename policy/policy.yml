@@ -1,0 +1,540 @@
+# Guest-app policy: the single source for every hard-gate rule (PLAN.md section 7).
+#
+# Two readers, one file:
+#   - the gate (`python3 -m gate check`) enforces every section below;
+#   - the rules generator (`python3 -m rules render`) turns the same sections into
+#     the Rules section of the guest template CLAUDE.md (rules/RULES.md).
+# Never change one reader's behaviour without this file. A test fails if
+# rules/RULES.md drifts from the generator's output.
+#
+# Everything here is an ALLOWLIST unless it says forbidden. Anything the gate does
+# not recognise fails closed.
+
+version: 1
+
+app:
+  bundle_id_prefix: "com.willoughbytools."
+  platform: iOS
+  deployment_target: "18.0"
+  # TARGETED_DEVICE_FAMILY "1" is iPhone. XcodeGen's default for iOS is "1,2"
+  # (iPhone and iPad), so the value must be set explicitly.
+  targeted_device_family: "1"
+  target_types:
+    application: {min: 1, max: 1}
+    bundle.unit-test: {min: 0, max: 1}
+    bundle.ui-testing: {min: 0, max: 1}
+
+project_yml:
+  path: project.yml
+  max_bytes: 262144
+  # Keys that make XcodeGen or Xcode run a command on the build machine, or pull
+  # in files the gate never read. Forbidden at ANY depth (targets, templates,
+  # schemes, options).
+  forbidden_keys:
+    preBuildScripts: "runs a shell script before every build"
+    postBuildScripts: "runs a shell script after every build"
+    postCompileScripts: "runs a shell script after compiling"
+    buildScripts: "runs a shell script as a build phase"
+    buildRules: "runs a custom command on matching files during the build"
+    buildToolPlugins: "runs a Swift package build-tool plugin during the build"
+    preGenCommand: "runs a shell command before XcodeGen generates the project"
+    postGenCommand: "runs a shell command after XcodeGen generates the project"
+    preActions: "runs a shell script before a scheme action"
+    postActions: "runs a shell script after a scheme action"
+    legacy: "hands the build to an external build tool"
+    aggregateTargets: "defines script-only targets"
+    include: "pulls another spec file into the project"
+    configFiles: "points build settings at an .xcconfig file"
+    settingGroups: "defines shared build-setting groups outside the checked settings"
+    groups: "applies shared build-setting groups outside the checked settings"
+    targetTemplates: "defines templates whose contents are merged in by XcodeGen"
+    templates: "merges target templates into a target"
+    projectReferences: "references another Xcode project"
+    compilerFlags: "passes extra flags to the compiler for some files"
+    buildPhase: "puts files in a build phase of its choosing, including a copy to any folder on the build machine"
+    copyFiles: "copies files to a destination it names, which can be any folder on the build machine"
+  allowed_top_level_keys: [name, options, settings, packages, targets, schemes]
+  allowed_option_keys:
+    - bundleIdPrefix
+    - deploymentTarget
+    - developmentLanguage
+    - createIntermediateGroups
+    - groupSortPosition
+    - generateEmptyDirectories
+    - indentWidth
+    - tabWidth
+    - usesTabs
+    - xcodeVersion
+    - minimumXcodeGenVersion
+  allowed_target_keys:
+    - type
+    - platform
+    - supportedDestinations
+    - deploymentTarget
+    - sources
+    - resources
+    - settings
+    - info
+    - entitlements
+    - dependencies
+    - scheme
+  # Keys a `sources` or `resources` entry may use. XcodeGen picks each file's
+  # build phase from its extension; anything else (buildPhase, copyFiles,
+  # headerVisibility, attributes) fails.
+  allowed_source_entry_keys: [path, excludes, includes, name, group, optional, type, createIntermediateGroups]
+  # Keys a target's `info` or `entitlements` may use.
+  allowed_plist_spec_keys: [path, properties]
+  # Dependency kinds a target may declare. `sdk` is an Apple system framework.
+  allowed_dependency_kinds: [package, target, sdk]
+  # Build settings a target, a configuration or the project may set. Anything else
+  # (a compiler path, linker flags, -load-plugin-executable) fails.
+  allowed_build_settings:
+    - PRODUCT_BUNDLE_IDENTIFIER
+    - PRODUCT_NAME
+    - MARKETING_VERSION
+    - CURRENT_PROJECT_VERSION
+    - GENERATE_INFOPLIST_FILE
+    - INFOPLIST_FILE
+    - SWIFT_VERSION
+    - SWIFT_STRICT_CONCURRENCY
+    - SWIFT_APPROACHABLE_CONCURRENCY
+    - SWIFT_DEFAULT_ACTOR_ISOLATION
+    - SWIFT_EMIT_LOC_STRINGS
+    - TARGETED_DEVICE_FAMILY
+    - IPHONEOS_DEPLOYMENT_TARGET
+    - ASSETCATALOG_COMPILER_APPICON_NAME
+    - ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME
+    - CODE_SIGN_ENTITLEMENTS
+    - CODE_SIGN_STYLE
+    - DEVELOPMENT_TEAM
+    - ENABLE_PREVIEWS
+    - DEVELOPMENT_ASSET_PATHS
+    - SUPPORTS_MACCATALYST
+    - SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD
+    - SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD
+    - LOCALIZATION_PREFERS_STRING_CATALOGS
+    - TEST_TARGET_NAME
+    - TEST_HOST
+    - BUNDLE_LOADER
+  allowed_build_setting_prefixes: [INFOPLIST_KEY_]
+  # Settings that must hold exactly these values wherever they appear.
+  fixed_build_settings:
+    SUPPORTS_MACCATALYST: ["NO", false]
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: ["NO", false]
+    SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: ["NO", false]
+
+files:
+  # Any path component with one of these suffixes fails: a committed Xcode
+  # project or workspace carries its own build phases, which the gate cannot
+  # read the way it reads project.yml. The pipeline generates the project.
+  forbidden_xcode_suffixes: [.xcodeproj, .xcworkspace, .pbxproj, .xcscheme]
+  # .xcconfig files allowed by exact repo-relative path. Empty: none are.
+  allowed_xcconfig_paths: []
+  binary_extensions:
+    - .a
+    - .o
+    - .so
+    - .dylib
+    - .framework
+    - .xcframework
+    - .bundle
+    - .swiftmodule
+    - .car
+    - .app
+    - .appex
+    - .ipa
+    - .exe
+    - .dll
+    - .jar
+    - .class
+    - .zip
+    - .tar
+    - .gz
+    - .tgz
+    - .bz2
+    - .xz
+    - .7z
+    - .rar
+    - .dmg
+    - .pkg
+    - .deb
+    - .rpm
+  # Leading bytes (hex) of executables and archives, checked on every file
+  # whatever its name, so renaming a binary to .png does not get it through.
+  binary_magic:
+    mach-o 32-bit: "feedface"
+    mach-o 64-bit: "feedfacf"
+    mach-o 32-bit (swapped): "cefaedfe"
+    mach-o 64-bit (swapped): "cffaedfe"
+    universal binary: "cafebabe"
+    universal binary 64-bit: "cafebabf"
+    universal binary (swapped): "bebafeca"
+    ELF executable: "7f454c46"
+    ar archive (static library): "213c617263683e0a"
+    zip archive: "504b0304"
+    gzip archive: "1f8b"
+    7-zip archive: "377abcaf271c"
+    xz archive: "fd377a585a00"
+    rar archive: "52617221"
+    bzip2 archive: "425a68"
+    zstd archive: "28b52ffd"
+    xar archive (.pkg, .xip): "78617221"
+    lz4 archive: "04224d18"
+    lzip archive: "4c5a4950"
+    compress (.Z) archive: "1f9d"
+    cpio archive: "303730373031"
+    cpio archive (odc): "303730373037"
+    wasm module: "0061736d"
+  # The same, at a fixed offset other than 0.
+  binary_magic_at:
+    tar archive: {offset: 257, hex: "7573746172"}
+  # Besides these, any file a zip reader opens is refused: zip is read from its
+  # end, so one appended to an image still unpacks.
+  #
+  # Every file must be a kind listed here, by extension (any case) or by exact
+  # name; anything else (C, Objective-C, C++, assembly, Metal, fonts, unknown
+  # data) fails. Content must match: a text type decodes as UTF-8, or UTF-16
+  # with a byte-order mark, with no control bytes; an image starts with its own
+  # signature (at `offset`) and, where given, ends with its `trailer`.
+  text_extensions: [.swift, .md, .txt, .json, .plist, .entitlements, .xcprivacy, .yml, .yaml,
+                    .strings, .stringsdict, .xcstrings, .svg, .csv]
+  text_names: [.gitignore, .gitattributes, .gitkeep, Package.resolved, LICENSE]
+  image_types:
+    .png: {offset: 0, magic: ["89504e470d0a1a0a"], trailer: "0000000049454e44ae426082"}
+    .jpg: {offset: 0, magic: ["ffd8ff"]}
+    .jpeg: {offset: 0, magic: ["ffd8ff"]}
+    .gif: {offset: 0, magic: ["474946383761", "474946383961"]}
+    .heic: {offset: 4, magic: ["66747970"]}
+    .pdf: {offset: 0, magic: ["25504446"]}
+  max_file_bytes: 5242880        # 5 MB for any single file
+  max_repo_bytes: 52428800       # 50 MB for the whole checkout, .git excluded
+  max_file_count: 5000
+  # Files that tell a scanner to skip something, or make git run a helper.
+  forbidden_names:
+    .gitmodules: "pulls another repository into this one"
+    .gitleaks.toml: "changes what the secret scanner looks for"
+    .gitleaksignore: "tells the secret scanner to ignore findings"
+    .semgrepignore: "tells the code scanner to skip files"
+    osv-scanner.toml: "tells the vulnerability scanner to ignore findings"
+    .osv-scanner.toml: "tells the vulnerability scanner to ignore findings"
+    Package.swift: "defines a Swift package, which can carry plugins and macros that run during the build"
+    .swiftpm: "holds Swift package manager configuration"
+    Podfile: "uses CocoaPods, which runs scripts during install"
+    Cartfile: "uses Carthage, which fetches prebuilt binaries"
+  # Text that silences a scanner from inside a file.
+  forbidden_text_markers:
+    "gitleaks:allow": "silences the secret scanner on that line"
+    "nosemgrep": "silences the code scanner on that line"
+    "nosem:": "silences the code scanner on that line"
+  gitattributes_forbidden: ["filter=", "diff=", "merge="]
+
+swift:
+  # Source text that declares or implements a Swift macro or package plugin.
+  # Either one runs compiler-side code on the build machine.
+  forbidden_patterns:
+    - pattern: '^\s*import\s+(PackagePlugin|SwiftCompilerPlugin|SwiftSyntaxMacros|SwiftSyntax|SwiftSyntaxBuilder)\b'
+      what: "imports a compiler or package plugin library"
+    - pattern: '#externalMacro\b'
+      what: "declares a Swift macro backed by a compiler plugin"
+    - pattern: '\b(BuildToolPlugin|CommandPlugin|CompilerPlugin|XcodeBuildToolPlugin)\b'
+      what: "implements a Swift package or compiler plugin"
+  # The gate's own copy of gate/semgrep/swift.yml's code rules, matched as text
+  # in every .swift file wherever it sits (semgrep skips vendor/, build/,
+  # tests/ and .gitignored paths by default). Text, not syntax: a match in a
+  # comment or string fails too, which is the safe direction.
+  risky_api_patterns:
+    - pattern: '\b(dlopen|dlsym)\b'
+      what: "loads native code at run time (dlopen/dlsym)"
+    - pattern: '\bBundle\(\s*(path|url):[^)]*\)\??\s*\.(load|loadAndReturnError)\b'
+      what: "loads a code bundle at run time"
+    - pattern: '@_silgen_name\b'
+      what: "binds a Swift name to an arbitrary C symbol (@_silgen_name), a way to call dlopen or private functions unseen"
+    - pattern: '\b(NSClassFromString|NSSelectorFromString)\b'
+      what: "looks up a class or method by a string name, the usual way to call private Apple APIs"
+    - pattern: '\b(evaluateScript|evaluateJavaScript|callAsyncJavaScript|WKUserScript)\b'
+      what: "runs JavaScript text, which can come from the network and change what the app does after review"
+
+dependencies:
+  # Swift packages Andrew has vetted (no plugins, no macros, no binary targets).
+  # Each entry: {url, versions: [exact versions allowed]}. Empty: no packages yet.
+  allowlist: []
+  resolved_path: Package.resolved
+
+entitlements:
+  # Entitlement keys Andrew has enabled, per approved bundle id. An app not
+  # listed here may have no entitlements at all.
+  per_app: {}
+
+usage_descriptions:
+  # When Swift source matches `api`, the app must declare `key` (a non-empty
+  # INFOPLIST_KEY_<key> build setting, target info.properties, or Info.plist) AND
+  # README.md must name the key, so a person can read what the app asks for.
+  readme_path: README.md
+  required:
+    - key: NSCameraUsageDescription
+      what: the camera
+      api: '\b(AVCaptureDevice|AVCaptureSession|UIImagePickerController\.SourceType\.camera|\.camera\b.*sourceType|DataScannerViewController)\b'
+    - key: NSMicrophoneUsageDescription
+      what: the microphone
+      api: '\b(AVAudioRecorder|requestRecordPermission|AVAudioApplication\.requestRecordPermission|SFSpeechAudioBufferRecognitionRequest)\b'
+    - key: NSPhotoLibraryUsageDescription
+      what: the whole photo library
+      api: '\bPHPhotoLibrary\b'
+    - key: NSPhotoLibraryAddUsageDescription
+      what: saving photos to the library
+      api: '\bUIImageWriteToSavedPhotosAlbum\b'
+    - key: NSLocationWhenInUseUsageDescription
+      what: location
+      api: '\b(CLLocationManager|CLLocationUpdate|CLMonitor)\b'
+    - key: NSContactsUsageDescription
+      what: contacts
+      api: '\bCNContactStore\b'
+    - key: NSCalendarsFullAccessUsageDescription
+      what: the calendar
+      api: '\bEKEventStore\b'
+    - key: NSSpeechRecognitionUsageDescription
+      what: speech recognition
+      api: '\bSFSpeechRecognizer\b'
+    - key: NSHealthShareUsageDescription
+      what: Health data
+      api: '\bHKHealthStore\b'
+    - key: NSMotionUsageDescription
+      what: motion and fitness
+      api: '\b(CMMotionActivityManager|CMPedometer|CMAltimeter)\b'
+    - key: NSBluetoothAlwaysUsageDescription
+      what: Bluetooth
+      api: '\b(CBCentralManager|CBPeripheralManager)\b'
+    - key: NSFaceIDUsageDescription
+      what: Face ID
+      api: '\bLAContext\b'
+    - key: NSUserTrackingUsageDescription
+      what: cross-app tracking
+      api: '\bATTrackingManager\b'
+    - key: NSAppleMusicUsageDescription
+      what: the music library
+      api: '\b(MPMediaLibrary|MPMediaQuery|MusicAuthorization)\b'
+    - key: NFCReaderUsageDescription
+      what: NFC
+      api: '\b(NFCNDEFReaderSession|NFCTagReaderSession)\b'
+
+infrastructure:
+  # Andrew's own servers and networks. Guest apps bring their own server
+  # (PLAN.md rev 2: guests use none of Andrew's resources except signing).
+  # Matched case-insensitively as text in EVERY file the gate loads (code,
+  # project.yml, plists, JSON, README, images), so a URL in a comment or a
+  # resource fails too, which is the safe direction. Text, not semantics: an
+  # address assembled at run time from pieces is for the advisory review.
+  # `what` is what the guest's CLAUDE.md shows, so it must not itself match
+  # (tests/test_rules_render.py renders the Rules into a clean repo and gates it).
+  forbidden_hosts:
+    - pattern: 'willoughbytools\.xyz\b'
+      what: "Andrew's own domain (`willoughbytools` then `.xyz`) and every address under it"
+    - pattern: '\b[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com\b'
+      what: "An Amazon API Gateway address (`<id>.execute-api.<region>.amazonaws` then `.com`), where Andrew's APIs live"
+    - pattern: '\b[a-z0-9]+\.lambda-url\.[a-z0-9-]+\.on\.aws\b'
+      what: "An AWS Lambda function address (`<id>.lambda-url.<region>.on` then `.aws`), where Andrew's services live"
+    - pattern: '\b[a-z0-9-]+\.ts\.net\b'
+      what: "A Tailscale address (anything ending in `.ts` then `.net`), Andrew's private network"
+    - pattern: '(?<![\d.])100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}(?![\d])'
+      what: "A Tailscale IP address (100.64 to 100.127, then two more numbers)"
+    - pattern: '(?<![\d.])192\.168\.\d{1,3}\.\d{1,3}(?![\d])'
+      what: "A home-network IP address (192.168, then two more numbers)"
+    - pattern: '(?<![\d.])10\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\d])'
+      what: "A private-network IP address (10, then three more numbers)"
+    - pattern: '(?<![\d.])172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}(?![\d])'
+      what: "A private-network IP address (172.16 to 172.31, then two more numbers)"
+    - pattern: '(?<![\d.])127\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\d])|\blocalhost\b'
+      what: "This computer (`local` then `host`, or 127 then three more numbers), which on a phone is nothing and on a build machine is Andrew's"
+
+secrets:
+  # Credential shapes the gate refuses on its own, before and beside gitleaks.
+  patterns:
+    AWS access key id: '\b(AKIA|ASIA)[0-9A-Z]{16}\b'
+    Anthropic API key: '\bsk-ant-[A-Za-z0-9_\-]{20,}'
+    OpenAI API key: '\bsk-(proj-)?[A-Za-z0-9_\-]{32,}'
+    GitHub token: '\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b'
+    Google API key: '\bAIza[0-9A-Za-z_\-]{35}\b'
+    Stripe secret key: '\b(sk|rk)_live_[0-9A-Za-z]{20,}\b'
+    Slack token: '\bxox[abposr]-[0-9A-Za-z\-]{10,}'
+    Private key block: '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----'
+
+scanners:
+  # Each scanner is a subprocess over the checked-out repo. A scanner that is not
+  # installed, exits with an unexpected code, or cannot be read is a HARD
+  # FAILURE: a missing scanner never passes silently. `{repo}`, `{report}` and
+  # `{semgrep_rules}` are filled in by the gate. Exit codes are from each tool's
+  # own docs (2026-09-18) and are re-pinned against `--help` once installed.
+  gitleaks:
+    what: secrets (API keys, tokens, passwords)
+    argv: [gitleaks, dir, "{repo}", --no-banner, --redact, --ignore-gitleaks-allow,
+           --report-format, json, --report-path, "{report}", --exit-code, "2"]
+    ok_exit: [0]
+    findings_exit: [2]
+    help_flags: [--no-banner, --redact, --ignore-gitleaks-allow, --report-format, --report-path, --exit-code]
+    help_argv: [gitleaks, dir, --help]
+  osv-scanner:
+    what: dependencies with known vulnerabilities
+    argv: [osv-scanner, scan, source, -r, --format, json, --output, "{report}", "{repo}"]
+    # 128 is "No packages found": an app with no Swift packages is clean.
+    ok_exit: [0, 128]
+    findings_exit: [1]
+    help_flags: [--format, --output, --recursive]
+    help_argv: [osv-scanner, scan, source, --help]
+  semgrep:
+    what: risky Swift code (downloaded code, private APIs, script injection)
+    # By default semgrep skips what .gitignore lists, its built-in ignore list
+    # (build/, vendor/, test/, tests/, ...) and files over 1 MB
+    # (https://docs.semgrep.dev/ignoring-files-folders-code), and XcodeGen
+    # compiles all of those. --no-git-ignore, --x-ignore-semgrepignore-files and
+    # a max target size above files.max_file_bytes turn each off; the docs are
+    # silent on whether the built-in list goes with the second flag, so the
+    # gate's own swift.risky_api check reads every .swift file regardless.
+    argv: [semgrep, scan, --config, "{semgrep_rules}", --json, --output, "{report}",
+           --error, --metrics, "off", --disable-version-check, --disable-nosem,
+           --no-git-ignore, --x-ignore-semgrepignore-files, --max-target-bytes, "10MB", "{repo}"]
+    ok_exit: [0]
+    findings_exit: [1]
+    help_flags: [--config, --json, --output, --error, --metrics, --disable-version-check, --disable-nosem,
+                 --no-git-ignore, --x-ignore-semgrepignore-files, --max-target-bytes]
+    help_argv: [semgrep, scan, --help]
+  clamscan:
+    what: known malware signatures
+    argv: [clamscan, --recursive, --infected, --no-summary, "{repo}"]
+    ok_exit: [0]
+    findings_exit: [1]
+    help_flags: [--recursive, --infected, --no-summary]
+    help_argv: [clamscan, --help]
+  timeout_seconds: 600
+
+# Every rule the gate can fail on, with what the guest's Claude is told about it.
+# `guest_rule` is rendered into the template CLAUDE.md; `plain_english` and
+# `fix_for_claude` go into the report the guest sees on a blocked commit.
+rules:
+  - id: bundle_id.invalid
+    guest_rule: "Your app's bundle ID is set by Andrew when he approves the app. Never change it."
+    plain_english: "The app's bundle ID is not one Andrew approved."
+    fix_for_claude: "Set PRODUCT_BUNDLE_IDENTIFIER in project.yml to exactly the approved bundle ID and do not change it again."
+  - id: project_yml.missing
+    guest_rule: "The app is described by `project.yml` at the top of the repo. Keep it there."
+    plain_english: "There is no project.yml at the top of the repo, so the app cannot be built."
+    fix_for_claude: "Restore project.yml at the repository root from the template."
+  - id: project_yml.invalid
+    guest_rule: "Keep `project.yml` plain YAML: no anchors, aliases, merge keys or custom tags."
+    plain_english: "project.yml could not be read safely."
+    fix_for_claude: "Rewrite project.yml as plain YAML without anchors (&), aliases (*), merge keys (<<) or tags (!), under the size limit."
+  - id: project_yml.forbidden_key
+    guest_rule: "Never add anything to `project.yml` that runs a command during a build or pulls in another file."
+    plain_english: "project.yml asks the build machine to run a command or read another file, which is not allowed."
+    fix_for_claude: "Remove the named key from project.yml. The app must build from its Swift sources alone."
+  - id: project_yml.unknown_key
+    guest_rule: "Use only the `project.yml` keys the template uses."
+    plain_english: "project.yml uses a setting the checker does not recognise, so it is refused to be safe."
+    fix_for_claude: "Remove the named key from project.yml, or ask Andrew with /willoughby-apps:help if the app truly needs it."
+  - id: project_yml.build_setting
+    guest_rule: "Only set the build settings the template already sets."
+    plain_english: "project.yml sets a build setting that is not on the allowed list."
+    fix_for_claude: "Remove the named build setting from project.yml, or ask Andrew with /willoughby-apps:help if it is needed."
+  - id: project_yml.target_type
+    guest_rule: "One iPhone app target, plus at most one unit-test and one UI-test target."
+    plain_english: "project.yml has a kind or number of targets that is not allowed."
+    fix_for_claude: "Keep exactly one iOS application target and at most one unit-test and one UI-test target."
+  - id: project_yml.platform
+    guest_rule: "The app is iOS only."
+    plain_english: "A target is built for a platform other than iOS."
+    fix_for_claude: "Set every target's platform to iOS and remove supportedDestinations other than iOS."
+  - id: project_yml.iphone_only
+    guest_rule: "The app is iPhone only (TARGETED_DEVICE_FAMILY \"1\")."
+    plain_english: "The app is not set to iPhone only."
+    fix_for_claude: "Set TARGETED_DEVICE_FAMILY to \"1\" in the app target's settings and remove any other value."
+  - id: project_yml.deployment_target
+    guest_rule: "The app targets iOS 18.0. Never change the deployment target."
+    plain_english: "The app does not target iOS 18.0."
+    fix_for_claude: "Set deploymentTarget to \"18.0\" (options.deploymentTarget.iOS or the target) and remove other IPHONEOS_DEPLOYMENT_TARGET values."
+  - id: project_yml.dependency
+    guest_rule: "Swift packages only from Andrew's allowlist, pinned to an exact version. No frameworks, Carthage or local packages."
+    plain_english: "The app uses a dependency that is not on Andrew's allowlist or is not pinned."
+    fix_for_claude: "Remove the dependency, or use a package from the allowlist in the Rules with exactVersion set to an allowed version. Ask Andrew with /willoughby-apps:help to vet a new one."
+  - id: project_yml.path_escape
+    guest_rule: "Every path in `project.yml` stays inside the repo."
+    plain_english: "project.yml points at a file outside the app's folder."
+    fix_for_claude: "Use relative paths inside the repository only (no leading /, ~ or ..)."
+  - id: files.xcode_project
+    guest_rule: "Never commit an `.xcodeproj` or `.xcworkspace`. The build machine generates the project from `project.yml`."
+    plain_english: "A generated Xcode project was committed. It can hide build steps, so it is not allowed."
+    fix_for_claude: "Delete the committed .xcodeproj/.xcworkspace/.xcscheme with git rm -r and add it to .gitignore."
+  - id: files.xcconfig
+    guest_rule: "Never commit `.xcconfig` files."
+    plain_english: "An .xcconfig file overrides build settings outside the checked project.yml."
+    fix_for_claude: "Delete the .xcconfig file and put allowed settings in project.yml instead."
+  - id: files.binary
+    guest_rule: "Never commit binaries or archives (.a, .dylib, .framework, .zip, compiled programs). Everything is Swift source, images and text."
+    plain_english: "A compiled program, library or archive was committed. Only source code, images and text are allowed."
+    fix_for_claude: "Delete the named file with git rm and rebuild the feature from Swift source."
+  - id: files.type_not_allowed
+    guest_rule: "Only Swift source, images and text files. No C, Objective-C, C++, assembly or Metal files, and no other kinds of file (the allowed kinds are under Reference)."
+    plain_english: "A kind of file the app may not contain was committed. Only Swift source, images and text are allowed."
+    fix_for_claude: "Delete the named file with git rm. Rewrite any C, Objective-C or assembly code in Swift. If the app truly needs another kind of file, ask Andrew with /willoughby-apps:help."
+  - id: files.symlink
+    guest_rule: "Never commit symbolic links."
+    plain_english: "A symbolic link was committed; it could point outside the app's folder."
+    fix_for_claude: "Replace the symbolic link with a real file or delete it."
+  - id: files.size
+    guest_rule: "Keep every file under 5 MB and the whole repo under 50 MB. Shrink big images."
+    plain_english: "A file, or the repo as a whole, is too big."
+    fix_for_claude: "Shrink or remove the large file (compress images, drop unused assets) until it is under the limit."
+  - id: files.forbidden_name
+    guest_rule: "Never add Swift packages of your own (Package.swift), CocoaPods, Carthage, git submodules, or scanner configuration."
+    plain_english: "A file was committed that could run code during the build or hide something from the security scanners."
+    fix_for_claude: "Delete the named file or folder with git rm."
+  - id: files.scanner_suppression
+    guest_rule: "Never add comments that silence a security scanner (the list is under Reference)."
+    plain_english: "A comment tries to silence a security scanner."
+    fix_for_claude: "Remove the suppression comment. If the scanner is wrong, ask Andrew with /willoughby-apps:help."
+  - id: files.gitattributes
+    guest_rule: "Never add git filters in `.gitattributes`."
+    plain_english: ".gitattributes asks git to run a helper program on files."
+    fix_for_claude: "Remove the filter=, diff= or merge= attributes from .gitattributes."
+  - id: swift.plugin_or_macro
+    guest_rule: "No Swift macros and no package or compiler plugins."
+    plain_english: "The code defines a Swift macro or plugin, which runs code on the build machine."
+    fix_for_claude: "Remove the macro or plugin and write the code as ordinary Swift."
+  - id: swift.risky_api
+    guest_rule: "No loading code at run time, no calling private Apple APIs by name, and no running JavaScript text (the list is under Reference)."
+    plain_english: "The code loads other code at run time, reaches private Apple APIs by name, or runs JavaScript text: things App Review and these checks never saw."
+    fix_for_claude: "Remove the named call and do the same thing with public Swift APIs. If the app truly needs it, ask Andrew with /willoughby-apps:help."
+  - id: deps.unpinned
+    guest_rule: "Every Swift package is pinned in `Package.resolved` at an allowed version."
+    plain_english: "A Swift package is not pinned to an allowed version in Package.resolved."
+    fix_for_claude: "Pin every package in Package.resolved at the repo root to an allowed version, and remove pins for packages the app does not use."
+  - id: entitlements.not_allowed
+    guest_rule: "No entitlements (capabilities like iCloud, push, HealthKit) unless Andrew has enabled them for your app."
+    plain_english: "The app asks for a capability Andrew has not enabled for it."
+    fix_for_claude: "Remove the named entitlement from the .entitlements file and project.yml, or ask Andrew with /willoughby-apps:help to enable it."
+  - id: usage_description.missing
+    guest_rule: "When the app uses the camera, microphone, photos, location, contacts or similar, declare the matching NS...UsageDescription in plain words."
+    plain_english: "The app uses something private on the phone without saying why."
+    fix_for_claude: "Add a non-empty INFOPLIST_KEY_<key> build setting to the app target in project.yml, explaining in one plain sentence why the app needs it."
+  - id: usage_description.not_in_readme
+    guest_rule: "List every NS...UsageDescription key in README.md under Permissions, with what it is for."
+    plain_english: "The README does not list a permission the app asks for."
+    fix_for_claude: "Add the named key to a Permissions section in README.md with a plain-English reason."
+  - id: infra.andrews_servers
+    guest_rule: "Your app brings its own server. Never make it talk to Andrew's servers, websites, private network or home network, and never write their addresses anywhere in the repo (the list is under Reference)."
+    plain_english: "The app points at one of Andrew's own servers or networks. Guest apps must bring their own server: Andrew's are not available to them."
+    fix_for_claude: "Remove every mention of the named address from the code, project.yml, resources and docs. If the feature needs a server, tell the guest in plain words that the app must bring its own (one they run or sign up for themselves), and ask Andrew with /willoughby-apps:help if unsure."
+  - id: secrets.hardcoded
+    guest_rule: "Never put API keys, tokens or passwords in the code. If a feature needs one, stop and ask Andrew with /willoughby-apps:help."
+    plain_english: "A secret key or token is written into the code."
+    fix_for_claude: "Delete the secret from the file (and tell the guest it must be revoked, since it is in git history). Ask Andrew with /willoughby-apps:help how the feature should work without it."
+  - id: scanner.missing
+    guest_rule: "Andrew's computer runs security scanners on every push; nothing ships until they all run."
+    plain_english: "A security scanner is not installed on Andrew's computer, so the check could not finish."
+    fix_for_claude: "Nothing to change in the app. Tell the guest this is on Andrew's side and use /willoughby-apps:help."
+  - id: scanner.error
+    guest_rule: "Andrew's computer runs security scanners on every push; nothing ships until they all run."
+    plain_english: "A security scanner failed to run, so the check could not finish."
+    fix_for_claude: "Nothing to change in the app unless the error names a file. Otherwise tell the guest this is on Andrew's side and use /willoughby-apps:help."
+  - id: scanner.findings
+    guest_rule: "Andrew's computer runs security scanners on every push; anything they find blocks the release."
+    plain_english: "A security scanner found a problem in the app."
+    fix_for_claude: "Read the scanner's findings in the report and fix each one in the code."

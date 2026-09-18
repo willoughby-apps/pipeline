@@ -1,0 +1,3 @@
+# The gate's Python dependencies on the gate job's runner (a venv; no guest code runs there).
+pyyaml==6.0.3
+semgrep==1.177.0

@@ -1,0 +1,43 @@
+# Every 5 minutes: start check.yml for each new branch head and v* tag in the
+# guest repos (ci/poll.py). A workflow_dispatch sent with GITHUB_TOKEN does
+# create a run (GitHub docs, "Triggering a workflow": "workflow_dispatch and
+# repository_dispatch events always create workflow runs").
+#
+# GitHub disables a public repo's scheduled workflows after 60 days with no
+# repository activity; README.md says how that is kept from happening.
+name: poll
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: list what would start, write nothing
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Find new commits and start their checks
+        env:
+          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+        run: python3 ci/poll.py ${DRY_RUN:+--dry-run}
