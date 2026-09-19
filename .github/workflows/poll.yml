@@ -1,5 +1,6 @@
 # Every 5 minutes: start check.yml for each new branch head and v* tag in the
-# guest repos (ci/poll.py). A workflow_dispatch sent with GITHUB_TOKEN does
+# guest repos (ci/poll.py), with two app tokens: one that can only list the
+# guest repos, then one limited to exactly those repos. A workflow_dispatch sent with GITHUB_TOKEN does
 # create a run (GitHub docs, "Triggering a workflow": "workflow_dispatch and
 # repository_dispatch events always create workflow runs").
 #
@@ -35,9 +36,38 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Find new commits and start their checks
+      - name: App token that can only read the org's custom properties
+        id: list-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: willoughby-apps
+          permission-organization-custom-properties: read
+
+      - name: List the guest repos
+        id: list
         env:
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          APP_TOKEN: ${{ steps.list-token.outputs.token }}
+        run: python3 ci/poll.py --list-repos
+
+      - if: steps.list.outputs.repos != ''
+        name: App token for exactly the guest repos (contents read, statuses write)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: willoughby-apps
+          repositories: ${{ steps.list.outputs.repos }}
+          permission-contents: read
+          permission-statuses: write
+          permission-organization-custom-properties: read
+
+      - name: Find new commits and start their checks
+        if: steps.list.outputs.repos != ''
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
           GITHUB_TOKEN: ${{ github.token }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: python3 ci/poll.py ${DRY_RUN:+--dry-run}

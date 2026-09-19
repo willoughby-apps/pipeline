@@ -1,6 +1,6 @@
 """Request job (tags only): open the release request and start the review.
 
-    ORG_TOKEN=... MONOREPO_DISPATCH=... REPO SHA TAG RUN_ID RUN_URL IPA_SHA256 \\
+    APP_TOKEN=... MONOREPO_DISPATCH=... REPO SHA TAG RUN_ID RUN_URL IPA_SHA256 \\
         python3 ci/request.py
 
 1. Opens (or reuses) the issue "Release request: <tag>" in the guest's repo,
@@ -10,7 +10,7 @@
 2. Dispatches `guest-review.yml` on ajcohen9/willoughby with the same pins, so
    the advisory review is posted on the issue.
 
-Only an issue the ORG_TOKEN's own user opened is reused. A guest has write on
+Only an issue the pipeline's bot (BOT_LOGIN) opened is reused. A guest has write on
 their repo, so they can open "Release request: v1.1" with the label before
 tagging; reusing it would put our pins into an issue whose body they can edit
 afterwards. The pin block is for people to read: a guest with write can edit
@@ -29,7 +29,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ghapi import ORG, Client, GitHubError, validate_inputs  # noqa: E402
+from ghapi import APP_TOKEN_ENV, BOT_LOGIN, ORG, Client, GitHubError, validate_inputs  # noqa: E402
 
 LABEL = "release-request"
 MONOREPO = "ajcohen9/willoughby"
@@ -78,8 +78,8 @@ def main() -> int:
     if not re.fullmatch(r"[0-9]{1,20}", run_id) or not re.fullmatch(r"[0-9a-f]{64}", ipa) \
             or not re.fullmatch(r"[0-9a-f]{64}", source):
         raise SystemExit("run id, unsigned build digest or source digest missing")
-    org = Client.from_env("ORG_TOKEN")
-    login = org.get("/user")["login"]
+    org = Client.from_env(APP_TOKEN_ENV)
+    login = BOT_LOGIN  # an installation token cannot call GET /user
     body = issue_body(repo, sha, tag, run_id, run_url, ipa, source)
     existing = find_open_request(org, repo, tag, login)
     if existing:

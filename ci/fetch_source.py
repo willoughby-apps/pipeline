@@ -1,6 +1,6 @@
 """Gate job: resolve the app, verify the commit, download the guest repo as data.
 
-    ORG_TOKEN=... REPO=sam-hello SHA=<40 hex> KIND=push|tag TAG=v1.2 \\
+    APP_TOKEN=... REPO=sam-hello SHA=<40 hex> KIND=push|tag TAG=v1.2 \\
         python3 ci/fetch_source.py OUT_TARBALL OUT_TREE_JSON
 
 No git runs on guest content: the tree comes from GitHub's tarball endpoint for
@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ghapi import ORG, Client, GitHubError, validate_inputs  # noqa: E402
+from ghapi import APP_TOKEN_ENV, ORG, Client, GitHubError, validate_inputs  # noqa: E402
 
 MAX_TARBALL_BYTES = 200 * 1024 * 1024
 BUNDLE_ID_RE = re.compile(r"com\.willoughbytools\.[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+")
@@ -89,7 +89,7 @@ def main(argv=None) -> int:
     repo, sha = os.environ.get("REPO", ""), os.environ.get("SHA", "")
     kind, tag = os.environ.get("KIND", ""), os.environ.get("TAG", "")
     validate_inputs(repo, sha, kind, tag)
-    client = Client.from_env("ORG_TOKEN")
+    client = Client.from_env(APP_TOKEN_ENV)
     bundle_id = resolve_bundle_id(app_properties(client, repo))
     try:
         tree_sha = verify_commit(client, repo, sha, kind, tag)

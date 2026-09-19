@@ -19,11 +19,22 @@ API = "https://api.github.com"
 ORG = "willoughby-apps"
 PIPELINE_REPO = f"{ORG}/pipeline"
 
+# The pipeline's GitHub App, willoughby-apps-bot. Every job that writes to a
+# guest repo mints its own installation token for that one repo
+# (actions/create-github-app-token) and passes it as APP_TOKEN. Statuses,
+# comments and issues it writes carry this login as `creator` / `user`: a
+# guest can write statuses on their own repo, but never as this bot.
+# Verified 2026-09-18: GET /users/willoughby-apps-bot[bot] -> id 331092058, type Bot.
+APP_TOKEN_ENV = "APP_TOKEN"
+BOT_LOGIN = "willoughby-apps-bot[bot]"
+
 # A guest repo name as onboarding creates it: <guest>-<app>, lower case.
 REPO_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 TAG_RE = re.compile(r"v[0-9]{1,4}(\.[0-9]{1,4}){0,2}")
 KINDS = ("push", "tag")
+# Org repos that are never a guest repo, and so never in a guest token's scope.
+RESERVED_REPOS = ("pipeline", "app-template", "start")
 
 
 class GitHubError(RuntimeError):
@@ -56,7 +67,7 @@ def next_link(link_header: str | None) -> str | None:
 
 def validate_inputs(repo: str, sha: str, kind: str, tag: str) -> None:
     """The check workflow's inputs, checked before any of them is used."""
-    if not REPO_NAME_RE.fullmatch(repo or "") or repo in ("pipeline", "app-template", "start"):
+    if not REPO_NAME_RE.fullmatch(repo or "") or repo in RESERVED_REPOS:
         raise ValueError(f"not a guest repo name: {repo!r}")
     if not SHA_RE.fullmatch(sha or ""):
         raise ValueError("sha must be a full 40-character lower-case commit SHA")
@@ -78,6 +89,9 @@ class Client:
     def from_env(cls, var: str) -> "Client":
         token = os.environ.get(var, "")
         if not token:
+            if var == APP_TOKEN_ENV:
+                raise SystemExit(f"{var} is not set: this job mints it with actions/create-github-app-token "
+                                 f"(secret APP_PRIVATE_KEY, variable APP_CLIENT_ID on {PIPELINE_REPO})")
             raise SystemExit(f"{var} is not set: add it as a secret of {PIPELINE_REPO}")
         return cls(token)
 

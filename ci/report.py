@@ -1,6 +1,6 @@
 """Report job: tell the guest's commit what happened.
 
-    ORG_TOKEN=... REPO SHA KIND TAG RUN_URL GATE_PASSED BUILT IPA_SHA256 \\
+    APP_TOKEN=... REPO SHA KIND TAG RUN_URL GATE_PASSED BUILT IPA_SHA256 \\
         python3 ci/report.py REPORTS_DIR
 
 REPORTS_DIR holds what the gate, build and preview jobs encrypted to the
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ghapi import ORG, Client, GitHubError, validate_inputs  # noqa: E402
+from ghapi import APP_TOKEN_ENV, ORG, Client, GitHubError, validate_inputs  # noqa: E402
 
 CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release"}
 PREVIEW_REF = "refs/willoughby/previews"
@@ -48,7 +48,7 @@ def _load_json(path: Path) -> dict | None:
 # The preview job ran the guest's app, which could rewrite its result.json.
 # Nothing from it reaches the markdown outside a code fence as written: the
 # stage becomes one of our own words and the device must look like a simulator
-# name, or the comment (posted as the ORG_TOKEN user, Andrew's account) could
+# name, or the comment (posted as willoughby-apps-bot, Andrew's pipeline) could
 # carry an @mention or a link in his voice.
 PREVIEW_STAGES = {"device": "finding a simulator", "boot": "starting the simulator",
                   "install": "installing the app", "launch": "opening the app",
@@ -191,7 +191,7 @@ def main(argv=None) -> int:
     repo, sha, kind, tag = env.get("REPO", ""), env.get("SHA", ""), env.get("KIND", ""), env.get("TAG", "")
     validate_inputs(repo, sha, kind, tag)
     reports = Path(argv[0])
-    client = Client.from_env("ORG_TOKEN")
+    client = Client.from_env(APP_TOKEN_ENV)
     v = verdict(env, reports)
     image_url = image_api = None
     png = screenshot_bytes(reports)

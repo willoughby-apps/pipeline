@@ -1,6 +1,13 @@
 """Poll: start check.yml for every new branch head and v* tag in the guest repos.
 
-    ORG_TOKEN=... GITHUB_TOKEN=... python3 ci/poll.py [--dry-run]
+    APP_TOKEN=... python3 ci/poll.py --list-repos      # writes repos=a,b to $GITHUB_OUTPUT
+    APP_TOKEN=... GITHUB_TOKEN=... python3 ci/poll.py [--dry-run]
+
+poll.yml runs it twice, each with its own app token: first a token with only
+organization custom properties read (no repository permission at all) lists
+the guest repos, then a token limited to exactly those repos (contents read,
+statuses write, organization custom properties read) polls them. Neither can
+reach `pipeline` with any write permission.
 
 A guest repo is any org repo with a `bundle_id` custom property (onboarding
 sets it with `guest`; only an org owner can). For each branch head and each
@@ -10,8 +17,8 @@ workflow_dispatch from GITHUB_TOKEN does start a run, per GitHub's docs) and
 immediately marks the commit `pending`, which is what stops the next poll from
 dispatching it again.
 
-"Ours" means created by the ORG_TOKEN's own user: a guest can write statuses on
-their repo, but not as that user.
+"Ours" means created by the pipeline's bot (ghapi.BOT_LOGIN): a guest can
+write statuses on their repo, but not as the bot.
 
 Per guest, at most DAILY_CAP checks start per UTC day, counted from check.yml's
 own runs (their run-name carries the repo). Past the cap the commit gets a
@@ -26,7 +33,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ghapi import ORG, PIPELINE_REPO, REPO_NAME_RE, SHA_RE, TAG_RE, Client  # noqa: E402
+from ghapi import APP_TOKEN_ENV, BOT_LOGIN, ORG, PIPELINE_REPO, REPO_NAME_RE, RESERVED_REPOS, SHA_RE, TAG_RE, Client  # noqa: E402
 
 DAILY_CAP = 20
 CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release"}
@@ -41,7 +48,7 @@ def guest_repos(org: Client) -> dict[str, str]:
     for row in org.paginate(f"/orgs/{ORG}/properties/values"):
         props = {p["property_name"]: p["value"] for p in row.get("properties", [])}
         name = row.get("repository_name", "")
-        if props.get("bundle_id") and REPO_NAME_RE.fullmatch(name):
+        if props.get("bundle_id") and REPO_NAME_RE.fullmatch(name) and name not in RESERVED_REPOS:
             out[name] = props.get("guest") or name.split("-", 1)[0]
     return out
 
@@ -94,7 +101,7 @@ def checks_today(pipeline: Client, repos: dict[str, str], today: dt.date) -> dic
 
 
 def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -> list[tuple]:
-    login = org.get("/user")["login"]
+    login = BOT_LOGIN  # an installation token cannot call GET /user
     repos = guest_repos(org)
     counts = checks_today(pipeline, repos, today)
     actions = []
@@ -126,11 +133,29 @@ def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -
     return actions
 
 
+def write_repos_output(names: list[str]) -> None:
+    """repos=a,b for the next step's app token (`repositories` input)."""
+    for n in names:
+        if not REPO_NAME_RE.fullmatch(n) or n in RESERVED_REPOS:
+            raise SystemExit(f"refusing a non-guest repo name in the token scope: {n!r}")
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a") as fh:
+            fh.write(f"repos={','.join(names)}\n")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="poll.py")
     ap.add_argument("--dry-run", action="store_true", help="list what would start; write nothing")
+    ap.add_argument("--list-repos", action="store_true",
+                    help="write the guest repo names to $GITHUB_OUTPUT as repos=a,b and exit")
     args = ap.parse_args(argv)
-    org = Client.from_env("ORG_TOKEN")
+    org = Client.from_env(APP_TOKEN_ENV)
+    if args.list_repos:
+        names = sorted(guest_repos(org))
+        write_repos_output(names)
+        print(f"{len(names)} guest repo(s)")
+        return 0
     pipeline = Client.from_env("GITHUB_TOKEN")
     actions = poll(org, pipeline, dt.datetime.now(dt.timezone.utc).date(), args.dry_run)
     started = sum(1 for a in actions if a[0] == "check")

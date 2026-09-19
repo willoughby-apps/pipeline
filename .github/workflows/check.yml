@@ -8,6 +8,11 @@
 #     and are validated by the script (ci/ghapi.py validate_inputs).
 #   - The two jobs that touch guest code (build compiles it, preview runs it)
 #     have `permissions: {}` and reference no secret.
+#   - GitHub access to a guest repo is an installation token of the
+#     willoughby-apps-bot app, minted in the job that uses it
+#     (actions/create-github-app-token), limited to that one guest repo and to
+#     the permissions that job needs, and revoked when the job ends. No job
+#     that runs guest code mints one.
 #   - Every action is GitHub-owned and pinned by full commit SHA; no caches
 #     (a job running guest code holds the run's cache-write token, so a cache
 #     could be poisoned for later runs).
@@ -43,7 +48,7 @@ on:
       kind: {required: true, type: string}
       tag: {required: false, type: string, default: ""}
     secrets:
-      ORG_TOKEN: {required: true}
+      APP_PRIVATE_KEY: {required: true}
       PIPELINE_PRIVATE_KEY: {required: true}
       MONOREPO_DISPATCH: {required: false}
 
@@ -60,7 +65,8 @@ env:
   TAG: ${{ inputs.tag }}
 
 jobs:
-  # The only job before `report` that holds ORG_TOKEN. It installs nothing
+  # The only job before `report` that holds a token for the guest repo (the
+  # app token, contents read, that one repo). It installs nothing
   # but the SHA-256-pinned age and parses nothing a guest wrote: it downloads
   # the tarball and the commit's tree listing, encrypts both to a key made for
   # this run, and exits. A secret referenced anywhere in a job reaches the
@@ -83,6 +89,17 @@ jobs:
       - name: Validate inputs
         run: python3 -c 'import os, sys; sys.path.insert(0, "ci"); import ghapi; ghapi.validate_inputs(os.environ["REPO"], os.environ["SHA"], os.environ["KIND"], os.environ["TAG"])'
 
+      - name: App token for this guest repo only (contents read)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: willoughby-apps
+          repositories: ${{ inputs.repo }}
+          permission-contents: read
+          permission-metadata: read
+
       - name: Install age (pinned)
         run: |
           ci/install_tools.sh "$RUNNER_TEMP/bin" age
@@ -91,7 +108,7 @@ jobs:
       - name: Fetch the guest repo as data
         id: fetch
         env:
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          APP_TOKEN: ${{ steps.app.outputs.token }}
         run: python3 ci/fetch_source.py "$RUNNER_TEMP/handoff/source.tar.gz" "$RUNNER_TEMP/handoff/tree.json"
 
       # The source goes to `gate` and `build` encrypted to a key made for this
@@ -366,6 +383,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate inputs (before any token exists)
+        run: python3 -c 'import os, sys; sys.path.insert(0, "ci"); import ghapi; ghapi.validate_inputs(os.environ["REPO"], os.environ["SHA"], os.environ["KIND"], os.environ["TAG"])'
+
+      - name: App token for this guest repo only (contents + statuses write)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: willoughby-apps
+          repositories: ${{ inputs.repo }}
+          permission-contents: write
+          permission-statuses: write
+          permission-metadata: read
+
       - name: Install age (pinned)
         run: |
           ci/install_tools.sh "$RUNNER_TEMP/bin" age
@@ -404,7 +436,7 @@ jobs:
       - name: Report on the guest commit
         id: report
         env:
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          APP_TOKEN: ${{ steps.app.outputs.token }}
           GATE_PASSED: ${{ needs.gate.outputs.passed }}
           BUILT: ${{ needs.build.outputs.built }}
           IPA_SHA256: ${{ needs.build.outputs.ipa_sha256 }}
@@ -435,9 +467,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Validate inputs (before any token exists)
+        run: python3 -c 'import os, sys; sys.path.insert(0, "ci"); import ghapi; ghapi.validate_inputs(os.environ["REPO"], os.environ["SHA"], os.environ["KIND"], os.environ["TAG"])'
+
+      - name: App token for this guest repo only (issues write)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: willoughby-apps
+          repositories: ${{ inputs.repo }}
+          permission-issues: write
+          permission-metadata: read
+
       - name: Open the release request and dispatch the review
         env:
-          ORG_TOKEN: ${{ secrets.ORG_TOKEN }}
+          APP_TOKEN: ${{ steps.app.outputs.token }}
           MONOREPO_DISPATCH: ${{ secrets.MONOREPO_DISPATCH }}
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

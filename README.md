@@ -18,8 +18,8 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 
 `check.yml`'s jobs:
 
-1. **fetch** (Ubuntu). The only job before `report` that holds `ORG_TOKEN`,
-   and it installs nothing but the SHA-256-pinned `age` and parses nothing a
+1. **fetch** (Ubuntu). The only job before `report` that holds a token for
+   the guest repo (the app's, contents read, that one repo), and it installs nothing but the SHA-256-pinned `age` and parses nothing a
    guest wrote. Resolves the bundle ID from the repo's `bundle_id` custom
    property (only an org owner can set it), checks the commit is in that repo
    (and, for a tag, that the tag still points at it), downloads GitHub's
@@ -51,9 +51,28 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 
 | Secret | Used by | Scope |
 |---|---|---|
-| `ORG_TOKEN` | `poll`, `fetch`, `report`, `request` | fine-grained PAT on `willoughby-apps`, **repository access limited to the guest repos** (never this repo, `app-template` or `start`): Contents read and write (the tarball; the previews ref), Commit statuses write, Issues write, Metadata read; organization Custom properties read. No Administration. |
+| `APP_PRIVATE_KEY` (+ variable `APP_CLIENT_ID`) | `poll`, `fetch`, `report`, `request` | the private key of the GitHub App **willoughby-apps-bot** (client ID `Iv23liiTpvQBZ5cbNj7a`, installed on the org). Never used directly: each of those jobs mints its own installation token with `actions/create-github-app-token`, **limited to the one guest repo** it works on and to the permissions that job needs (table below), and the token is revoked when the job ends. |
 | `MONOREPO_DISPATCH` | `request` | fine-grained PAT on `ajcohen9/willoughby`: Actions write. |
 | `PIPELINE_PRIVATE_KEY` | `report` | the age identity for `keys/pipeline.age.pub` (`guest-apps/scripts/pipeline_keypair.sh`). The Mini holds the same key to decrypt the unsigned build. |
+
+The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
+
+| Job | Repositories | Permissions |
+|---|---|---|
+| `poll` (1st token) | none named (org-level only) | organization custom properties read: lists the guest repos |
+| `poll` (2nd token) | exactly the guest repos the 1st listed | contents read, commit statuses write, organization custom properties read |
+| `fetch` | the one guest repo (`inputs.repo`, validated first) | contents read, metadata read |
+| `report` | the one guest repo | contents write (the previews ref, the commit comment), commit statuses write, metadata read |
+| `request` | the one guest repo | issues write, metadata read |
+
+The app itself has Administration write (onboarding and the future enroll job
+add collaborators with it), but no token minted here asks for it, and no token
+here names this repo, `app-template` or `start`. The pipeline's statuses,
+comments and issues are therefore written by **`willoughby-apps-bot[bot]`**
+(`ci/ghapi.py BOT_LOGIN`, checked against `GET /users/willoughby-apps-bot[bot]`
+on 2026-09-18: a `Bot`, id 331092058), and that login is what every consumer
+matches `creator` / `user` against. An installation token cannot call
+`GET /user`, so the scripts never ask who they are.
 
 `gate`, `build` and `preview` reference none of them; `build` and `preview`
 also have a token with no permissions (`permissions: {}`). A secret referenced
@@ -73,14 +92,13 @@ key). The release binary is pinned by SHA-256 (`ci/install_tools.sh`).
 
 **Source hand-off without a long-lived secret in the build job.** The build
 job must get the private source but may hold no secret, since it compiles
-guest code. The fetch job (which holds `ORG_TOKEN`) encrypts the
+guest code. The fetch job (which holds the app token) encrypts the
 tarball and the tree listing to a key pair it makes for this run only, uploads
 the ciphertext with 1-day retention, and passes the one-run private key to
 `gate` and `build` as a job output; `report` deletes the artifact at the end of
 the run. Alternatives
-rejected: a token in the build job (a fine-grained PAT reads every guest repo,
-so guest code could read other guests' apps; GitHub-scoped per-repo tokens need
-a GitHub App); `actions/checkout` with `ORG_TOKEN` (a secret in a guest-code
+rejected: a token in the build job (even a one-repo app token is a credential
+that guest code could use or keep); `actions/checkout` with a token (a secret in a guest-code
 job); an unencrypted artifact (public). GitHub's docs advise against passing a
 *masked* secret between jobs, since outputs holding one are dropped; this key
 is not a registered secret, is never printed, opens only this run's ciphertext
@@ -93,7 +111,7 @@ anything running on a runner can reach that run's artifact token. Keeping it
 off the `build` machine means the unsigned build's SHA-256 was recorded by a
 job that never ran guest code. `report` puts that digest in the commit status
 (`unsigned sha256 <hex>`), and the Mini's `guest-sign.yml` must match the
-decrypted `unsigned.ipa` against a status created by the pipeline's own user
+decrypted `unsigned.ipa` against a status created by the pipeline's bot
 (a guest can write statuses on their repo, but not as that user) before
 signing.
 
@@ -121,9 +139,13 @@ never used at all.
 `PIPELINE_PRIVATE_KEY` and `MONOREPO_DISPATCH` in the environment, so a push to
 main is as good as both secrets. A repository ruleset blocks creating,
 updating, deleting and force-pushing the default branch for everyone but
-Andrew's own user, and `ORG_TOKEN` does not have this repo in its repository
-list at all. Adding a collaborator to a guest repo (enrolling) needs
-Administration, which lives in a separate token for the future enroll job only.
+Andrew's own user, and no app token minted here names this repo in its
+`repositories` (the one that names no repo carries only organization custom
+properties read). The app's private key itself could mint a wider token (the
+app is installed on every org repo and holds Administration write), which is
+why only `fetch`, `report` and `request` reference it, each installs nothing
+but the pinned `age`, and the ruleset's bypass list is Andrew's user alone, not
+the app: even a stolen key cannot push to this repo's main.
 
 **Actions.** GitHub-owned only (org policy), each pinned by full commit SHA.
 
