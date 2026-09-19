@@ -47,9 +47,13 @@ jobs:
         run: |
           set -euo pipefail
           work=$(mktemp -d)
-          curl -fsSL https://api.github.com/repos/cli/cli/releases/latest -o "$work/release.json"
-          pkg_url=$(python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["assets"]; print(next(x["browser_download_url"] for x in a if x["name"].endswith("_macOS_universal.pkg")))' "$work/release.json")
-          sums_url=$(python3 -c 'import json,sys; a=json.load(open(sys.argv[1]))["assets"]; print(next(x["browser_download_url"] for x in a if x["name"].endswith("_checksums.txt")))' "$work/release.json")
+          # Not api.github.com: unauthenticated, a shared runner IP gets 403
+          # (measured 2026-09-19, twice); the release page's redirect names the tag.
+          latest=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest)
+          version=${latest##*/v}
+          echo "latest gh: $version"
+          pkg_url="https://github.com/cli/cli/releases/download/v$version/gh_${version}_macOS_universal.pkg"
+          sums_url="https://github.com/cli/cli/releases/download/v$version/gh_${version}_checksums.txt"
           pkg="$work/$(basename "$pkg_url")"
           curl -fsSL -o "$pkg" "$pkg_url"
           curl -fsSL -o "$work/checksums.txt" "$sums_url"
