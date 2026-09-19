@@ -65,7 +65,7 @@ jobs:
         run: python3 ci/poll.py --list-repos
 
       - if: steps.list.outputs.repos != ''
-        name: App token for exactly the guest repos (contents read, statuses write)
+        name: App token for exactly the guest repos (contents read, statuses write, issues write)
         id: app
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -75,6 +75,9 @@ jobs:
           repositories: ${{ steps.list.outputs.repos }}
           permission-contents: read
           permission-statuses: write
+          # Only to tell Andrew, with a needs-andrew issue, that a commit failed
+          # on his side three times (ci/alert.py).
+          permission-issues: write
           permission-organization-custom-properties: read
 
       # This job runs no guest code and installs nothing; it never hands a

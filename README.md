@@ -13,7 +13,7 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 
 | Workflow | When | What |
 |---|---|---|
-| `poll.yml` | every 5 minutes (a `workflow_dispatch` from a launchd agent on Andrew's Mini; the cron `3-58/5` is only a backup, since GitHub delays and drops scheduled runs under load), or by hand (`dry_run`) | For each guest repo (an org repo with a `bundle_id` custom property), each branch head and `v*` tag without a status from us starts `check.yml` and is marked `pending`. At most 20 checks per guest per UTC day. When the default-branch head is ahead of the repo's `approved_sha` (the last commit Andrew approved, set by his reconciler) and only `testers.txt` (plus his managed files) changed, it starts `check.yml` with kind `testers` (a testers request, nothing built). Poll never hands a pushed tester list to the Mini: only an approved commit's list takes effect. |
+| `poll.yml` | every 5 minutes (a `workflow_dispatch` from a launchd agent on Andrew's Mini; the cron `3-58/5` is only a backup, since GitHub delays and drops scheduled runs under load), or by hand (`dry_run`) | For each guest repo (an org repo with a `bundle_id` custom property), each branch head and `v*` tag without a status from us starts `check.yml` and is marked `pending`. At most 20 checks per guest per UTC day. A commit whose check failed on our side (an `error` of ours, or a `Queued` status no run replaced within 90 minutes) is checked again, at most twice; when the third try fails too, `ci/alert.py` opens a `needs-andrew` issue in the guest repo that @mentions Andrew, and the commit is marked `error` "Stopped:" (a run started by `GITHUB_TOKEN` notifies nobody). When the default-branch head is ahead of the repo's `approved_sha` (the last commit Andrew approved, set by his reconciler) and only `testers.txt` (plus his managed files) changed, it starts `check.yml` with kind `testers` (a testers request, nothing built). Poll never hands a pushed tester list to the Mini: only an approved commit's list takes effect. |
 | `check.yml` | dispatched by `poll.yml`, or by hand, or `workflow_call` | `fetch` (the commit, and the approved commit to compare) → `gate` (+ the change summary, `gate changes`) → `build` → `preview` → `report` → `request` (tags: release request + review; `testers`: testers request, no build or preview). |
 | `enroll.yml` | an issue is opened here | Redeems an invite code (`ci/enroll.py`): below. |
 | `setup-smoke.yml` | by hand | Runs the setup skill's non-interactive install commands (Claude Code, git, gh) on clean GitHub-hosted Mac (`macos-26`) and Windows (`windows-2025`) machines and installs the plugin from `willoughby-apps/start` with `claude plugin marketplace add` and `claude plugin install`. No secret, no token, no action. |
@@ -77,7 +77,7 @@ The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
 | Job | Repositories | Permissions |
 |---|---|---|
 | `poll` (1st token) | none named (all, read-only) | organization custom properties read, metadata read: lists the guest repos (without metadata the token is scoped to no repo and sees only this public one: measured 2026-09-18) |
-| `poll` (2nd token) | exactly the guest repos the 1st listed | contents read, commit statuses write, organization custom properties read |
+| `poll` (2nd token) | exactly the guest repos the 1st listed | contents read, commit statuses write, issues write (only `ci/alert.py`: the `needs-andrew` issue when a commit failed on Andrew's side three times), organization custom properties read |
 | `fetch` | the one guest repo (`inputs.repo`, validated first) | contents read, metadata read |
 | `report` | the one guest repo | contents write (the previews ref, the commit comment), commit statuses write, metadata read |
 | `request` | the one guest repo | issues write, metadata read |
@@ -112,11 +112,17 @@ A new guest's `/willoughby-apps:setup CODE` opens an issue here: title
 The comment is from `github-actions[bot]`, since the app is not installed
 here. GitHub keeps an issue's edit history, readable by anyone, so blanking
 hides the code from the page and from search, not from that history: that is
-why a code is worth nothing once used. If a matched code's invitation fails,
-the code is still unspent and visible in that history, so Andrew mints a new
-one for that guest (`python3 -m onboard code --guest ...`), which replaces
-it. A failed run notifies the issue's author, not Andrew; the guest's Claude
-tells them to send Andrew a message after 10 minutes without an invitation.
+why a code is worth nothing once used. The record is posted before the
+invite step, so a failure after it (the app token, the invitation, a runner)
+used to spend the code with nobody invited. The record therefore also holds
+`owner_mark`, a digest of the code and the numeric user id of the account
+that presented it first (audit 2026-09-19): that account alone may present
+it again, and the invite step still refuses a repo that already has a
+collaborator or a pending invitation. The guest's Claude opens the request
+once more after 10 minutes without an invitation, and only then has them
+send Andrew a message; `python3 -m onboard code --guest ...` replaces a code
+no account of the guest's can use. A failed run notifies the issue's author,
+not Andrew.
 
 The app itself has Administration write, but only the enroll job's token asks
 for it, and no token here names this repo, `app-template` or `start`, where

@@ -80,6 +80,15 @@ def _text(value, limit=400) -> str:
     return s[:limit]
 
 
+# Gate rules that mean the pipeline broke, not the app.
+PIPELINE_RULES = ("scanner.missing", "scanner.error")
+# What an `error` tells the guest: nothing to change, and nothing to push. poll
+# checks the commit again by itself (ci/poll.py MAX_RETRIES) and tells Andrew
+# with a needs-andrew issue when the last try fails too.
+RETRY_TEXT = ("This is a problem with Andrew's system, not with the app: change nothing. It checks this commit "
+              "again by itself, and if that fails too, Andrew is told on an issue in this repo.")
+
+
 def verdict(env: dict, reports: Path) -> dict:
     """{state, description, headline, sections[]} from the job results and reports."""
     gate = _load_json(reports / "gate/gate.json")
@@ -96,6 +105,12 @@ def verdict(env: dict, reports: Path) -> dict:
                     where += f":{int(f['line'])}"
                 lines.append(f"[{_text(f.get('rule'), 60)}] {where}\n  {_text(f.get('plain_english'))}\n"
                              f"  Fix: {_text(f.get('fix_for_claude'))}")
+            if fails and all(isinstance(f, dict) and f.get("rule") in PIPELINE_RULES for f in fails):
+                # A scanner that is missing or broke is the pipeline's problem,
+                # not the app's: `error`, which poll retries (audit 2026-09-19).
+                sections.append(("What could not run", "\n".join(lines)))
+                return {"state": "error", "description": "A safety scanner could not run (a pipeline problem).",
+                        "headline": "A safety scanner could not run. " + RETRY_TEXT, "sections": sections}
             sections.append(("Safety checks that blocked this commit", "\n".join(lines)))
             return {"state": "failure", "description": f"Blocked by {len(fails)} safety check(s).",
                     "headline": "Blocked: this commit did not pass the safety checks.", "sections": sections}
@@ -106,7 +121,7 @@ def verdict(env: dict, reports: Path) -> dict:
                     "headline": "Blocked: the repo could not be unpacked safely (for example a link that points outside it).",
                     "sections": sections}
         return {"state": "error", "description": "The safety checks could not run (a pipeline problem).",
-                "headline": "The safety checks could not run. This is a problem with the pipeline, not with your code: push again later, or ask Andrew with /willoughby-apps:help if it keeps happening.",
+                "headline": "The safety checks could not run. " + RETRY_TEXT,
                 "sections": sections}
     if env.get("KIND") == "testers":
         # Nothing is built for a tester-list change: the gate passed, and the
@@ -128,7 +143,7 @@ def verdict(env: dict, reports: Path) -> dict:
             return {"state": "failure", "description": "Did not compile.",
                     "headline": "Passed the safety checks, but the app did not compile.", "sections": sections}
         return {"state": "error", "description": "The build could not run (a pipeline problem).",
-                "headline": "The build could not run. This is a problem with the pipeline, not with your code: push again later, or ask Andrew with /willoughby-apps:help if it keeps happening.", "sections": sections}
+                "headline": "The build could not run. " + RETRY_TEXT, "sections": sections}
     if not (preview and preview.get("ok") is True):
         stage = _stage((preview or {}).get("stage"), PREVIEW_STAGES)
         return {"state": "failure", "description": "Compiles, but did not open in the simulator.",
@@ -158,28 +173,43 @@ def icon_path(reports: Path) -> str | None:
     return path
 
 
-def icon_links(repo: str, sha: str, path: str) -> tuple[str, str]:
-    """(an image URL for the comment, the `gh api` path Claude fetches it with)."""
+def icon_links(repo: str, sha: str, path: str) -> tuple[str, str, str]:
+    """(an image URL for the comment, the `gh api` path Claude fetches it with,
+    the commit it is read at)."""
     from urllib.parse import quote
     q = "/".join(quote(p) for p in path.split("/"))
     return (f"https://github.com/{ORG}/{repo}/blob/{sha}/{q}?raw=true",
-            f"repos/{ORG}/{repo}/contents/{q}?ref={sha}")
+            f"repos/{ORG}/{repo}/contents/{q}", sha)
 
 
 # The guest's app folder pre-allows exactly `gh api repos/willoughby-apps/* --method
 # GET --hostname github.com` (template .claude/settings.json): gh takes the last
 # --method and --hostname it is given, so that form can only read from GitHub.
 READ_SUFFIX = "--method GET --hostname github.com"
+SHA40_RE = re.compile(r"[0-9a-f]{40}")
+# Our own contents paths only: no shell-special character can reach the line.
+API_PATH_RE = re.compile(r"repos/willoughby-apps/[a-z0-9-]{1,100}/contents/[A-Za-z0-9._%/-]{1,600}")
 
 
-def fetch_command(api_path: str, name: str) -> str:
+def fetch_command(api_path: str, ref: str, name: str) -> str:
     """The command the guest's Claude runs to save a picture into the app's
-    build/ folder (kept out of commits by .git/info/exclude)."""
-    return f"gh api {api_path} -H 'Accept: application/vnd.github.raw' {READ_SUFFIX} > build/{name}"
+    build/ folder (kept out of commits by .git/info/exclude).
+
+    No `?` anywhere (audit 2026-09-19): in zsh, the Mac's shell and the one
+    Claude Code's Bash tool runs there, an unquoted `...png?ref=<sha>` is a
+    glob that matches nothing, so the command stopped with "no matches found"
+    before gh ran, and a quoted path no longer matched the folder's allow
+    rule. The commit goes in as `-f ref=<sha>`, which `--method GET` sends as
+    the query string (gh api --help). The `>` must run in a shell that writes
+    bytes as they are, not Windows PowerShell 5.1 (how-it-works says so)."""
+    if not (SHA40_RE.fullmatch(ref or "") and API_PATH_RE.fullmatch(api_path or "")):
+        raise ValueError("not a fetchable contents path and commit")
+    return (f"gh api {api_path} -f ref={ref} -H 'Accept: application/vnd.github.raw' {READ_SUFFIX}"
+            f" > build/{name}")
 
 
-def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | None,
-                 icon: tuple[str, str] | None = None) -> str:
+def comment_body(v: dict, env: dict, image_url: str | None, image_api: tuple[str, str] | None,
+                 icon: tuple[str, str, str] | None = None) -> str:
     kind = env.get("KIND")
     title = {"tag": f"Release check for {env.get('TAG')}", "testers": "Tester list check"}.get(kind, "Check")
     parts = [f"**{title}: {v['headline']}**", ""]
@@ -194,10 +224,10 @@ def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | Non
         parts += ["The app icon:", "", f'<img src="{icon[0]}" width="120" alt="app icon">', ""]
     elif image_url:
         parts += ["Screenshot from the iPhone simulator:", "", f"![screenshot]({image_url})", ""]
-    if image_url:
-        parts += [f"Claude can fetch it with: `{fetch_command(image_api, 'screenshot.png')}`", ""]
+    if image_url and image_api:
+        parts += [f"Claude can fetch it with: `{fetch_command(image_api[0], image_api[1], 'screenshot.png')}`", ""]
     if icon:
-        parts += [f"And the icon with: `{fetch_command(icon[1], 'icon.png')}`", ""]
+        parts += [f"And the icon with: `{fetch_command(icon[1], icon[2], 'icon.png')}`", ""]
     parts += [f"Pipeline run: {env.get('RUN_URL')}"]
     return "\n".join(parts)[:MAX_COMMENT_CHARS]
 
@@ -308,7 +338,7 @@ def main(argv=None) -> int:
             print(f"warning: previews not stored ({type(e).__name__})")
     if "screenshot" in stored:
         image_url = f"https://github.com/{ORG}/{repo}/blob/{previews_commit}/{stored['screenshot']}?raw=true"
-        image_api = f"repos/{ORG}/{repo}/contents/{stored['screenshot']}?ref={previews_commit}"
+        image_api = (f"repos/{ORG}/{repo}/contents/{stored['screenshot']}", previews_commit)
     client.post(f"/repos/{ORG}/{repo}/statuses/{sha}", {
         "state": v["state"], "context": CONTEXTS[kind], "description": v["description"][:140],
         "target_url": env.get("RUN_URL")})

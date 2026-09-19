@@ -77,6 +77,20 @@ jobs:
           test -f "$guide"
           head -5 "$guide"
 
+      # The plugin's bin/ is on Claude's Bash tool PATH (Git Bash on Windows);
+      # the loop waits with it (how-it-works, "Waiting"). No token here, so it
+      # can only show that it runs, refuses bad arguments, and gives up in time.
+      - name: The plugin's willoughby-wait runs in Bash and checks its arguments
+        shell: bash
+        run: |
+          set -u
+          w="$HOME/.claude/plugins/marketplaces/willoughby-apps/plugins/willoughby-apps/bin/willoughby-wait"
+          test -f "$w"
+          rc=0; bash "$w" sam-hello not-a-sha || rc=$?
+          test "$rc" = 2
+          rc=0; WILLOUGHBY_WAIT_LIMIT=2 WILLOUGHBY_WAIT_INTERVAL=1 bash "$w" sam-hello 0000000000000000000000000000000000000000 || rc=$?
+          test "$rc" = 3
+
       - name: Icon from sips (the icon skill's Mac steps, an RGBA picture that is not square)
         run: |
           set -euo pipefail
@@ -174,6 +188,20 @@ jobs:
           $guide = "$env:USERPROFILE\.claude\plugins\marketplaces\willoughby-apps\setup.md"
           if (-not (Test-Path -LiteralPath $guide)) { throw "no setup.md at $guide" }
           Get-Content -LiteralPath $guide -TotalCount 5
+
+      # The plugin's bin/ is on Claude's Bash tool PATH (Git Bash on Windows);
+      # the loop waits with it (how-it-works, "Waiting"). No token here, so it
+      # can only show that it runs, refuses bad arguments, and gives up in time.
+      - name: The plugin's willoughby-wait runs in Bash and checks its arguments
+        shell: bash
+        run: |
+          set -u
+          w="$HOME/.claude/plugins/marketplaces/willoughby-apps/plugins/willoughby-apps/bin/willoughby-wait"
+          test -f "$w"
+          rc=0; bash "$w" sam-hello not-a-sha || rc=$?
+          test "$rc" = 2
+          rc=0; WILLOUGHBY_WAIT_LIMIT=2 WILLOUGHBY_WAIT_INTERVAL=1 bash "$w" sam-hello 0000000000000000000000000000000000000000 || rc=$?
+          test "$rc" = 3
 
       - name: Icon from the plugin's icon.ps1 (Windows PowerShell 5.1, an ARGB picture that is not square)
         run: |

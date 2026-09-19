@@ -295,7 +295,9 @@ usage_descriptions:
   required:
     - key: NSCameraUsageDescription
       what: the camera
-      api: '\b(AVCaptureDevice|AVCaptureSession|UIImagePickerController\.SourceType\.camera|\.camera\b.*sourceType|DataScannerViewController)\b'
+      # Also the usual picker setup, which names `.camera` after `sourceType`
+      # (`picker.sourceType = .camera`, `isSourceTypeAvailable(.camera)`); audit 2026-09-19.
+      api: '\b(AVCaptureDevice|AVCaptureSession|UIImagePickerController\.SourceType\.camera|\.camera\b.*sourceType|DataScannerViewController)\b|\bsourceType\s*=\s*(UIImagePickerController\.SourceType)?\.camera\b|\bisSourceTypeAvailable\s*\(\s*(UIImagePickerController\.SourceType)?\.camera\s*\)'
     - key: NSMicrophoneUsageDescription
       what: the microphone
       api: '\b(AVAudioRecorder|requestRecordPermission|AVAudioApplication\.requestRecordPermission|SFSpeechAudioBufferRecognitionRequest)\b'
@@ -515,6 +517,10 @@ rules:
     guest_rule: "Every path in `project.yml` stays inside the repo."
     plain_english: "project.yml points at a file outside the app's folder."
     fix_for_claude: "Use relative paths inside the repository only (no leading /, ~ or ..)."
+  - id: project_yml.export_compliance
+    guest_rule: "Keep `ITSAppUsesNonExemptEncryption: false` in the app target's `info: properties:` in `project.yml`. Never remove it or set it to true."
+    plain_english: "The app no longer says it uses only standard encryption, so Apple would hold every build for a question only Andrew can answer, and nobody could install it."
+    fix_for_claude: "Put `ITSAppUsesNonExemptEncryption: false` back under the app target's `info: properties:` in project.yml, and remove any other value of it (a build setting or an Info.plist)."
   - id: files.xcode_project
     guest_rule: "Never commit an `.xcodeproj` or `.xcworkspace`. The build machine generates the project from `project.yml`."
     plain_english: "A generated Xcode project was committed. It can hide build steps, so it is not allowed."
@@ -590,11 +596,11 @@ rules:
   - id: scanner.missing
     guest_rule: "Andrew's computer runs security scanners on every push; nothing ships until they all run."
     plain_english: "A security scanner is not installed on Andrew's computer, so the check could not finish."
-    fix_for_claude: "Nothing to change in the app. Tell the guest this is on Andrew's side and use /willoughby-apps:help."
+    fix_for_claude: "Nothing to change in the app. This is on Andrew's side: his system checks the commit again by itself and tells Andrew if it keeps failing. Wait for the new result."
   - id: scanner.error
     guest_rule: "Andrew's computer runs security scanners on every push; nothing ships until they all run."
     plain_english: "A security scanner failed to run, so the check could not finish."
-    fix_for_claude: "Nothing to change in the app unless the error names a file. Otherwise tell the guest this is on Andrew's side and use /willoughby-apps:help."
+    fix_for_claude: "Nothing to change in the app unless the error names a file of the app. Otherwise this is on Andrew's side: his system checks the commit again by itself and tells Andrew if it keeps failing. Wait for the new result."
   - id: scanner.findings
     guest_rule: "Andrew's computer runs security scanners on every push; anything they find blocks the release."
     plain_english: "A security scanner found a problem in the app."

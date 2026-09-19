@@ -34,7 +34,20 @@ presented once is refused for good, as is one whose repo has any direct
 collaborator or pending invitation. Every checked code is recorded, known or
 not, so the record says nothing about which codes were real. A request that
 fails the format or the rate limit is not checked, so its code is not
-recorded. A code whose invitation never arrived is replaced (`onboard code`).
+recorded.
+
+**The first account keeps its code (audit 2026-09-19).** The record is posted
+before the invite step, so a failure after it (the app token, GitHub
+refusing the invitation, a runner problem) used to spend the code with no
+invitation made, and only Andrew could recover (`onboard code` and a new
+welcome message). So the record also carries `owner_mark`: a digest of the
+code with the numeric id (never the login, which can be renamed and taken)
+of the account that presented it FIRST. A later request with the same code
+from that same account is checked again; any other account is refused for
+good, as before. The invite step still refuses a repo that has a direct
+collaborator or a pending invitation, so a second try only ever invites when
+the first one left nothing behind (or the guest declined it themselves).
+`onboard code` is left for a code that no account of the guest's can use.
 
 The comment never says whether a code was known: "received" is the same
 words for a match, a spent code and an unknown one. The run page does show
@@ -67,13 +80,15 @@ PERMISSION = "push"  # GitHub's name for write access
 # not installed on this repo, so the job comments with its GITHUB_TOKEN.
 ACTIONS_BOT = "github-actions[bot]"
 MARK_PREFIX = "<!-- willoughby-enroll-request "
+OWNER_PREFIX = "<!-- willoughby-enroll-owner "
 
 RESULTS = ("received", "format", "busy")
 MESSAGES = {
     "received": ("Thanks, this enroll request was read and removed from view. If the invite code "
                  "was valid and unused, an invitation to your app is waiting for this GitHub account "
-                 "(it also arrives by email). If nothing arrives within 10 minutes, send Andrew your "
-                 "GitHub username."),
+                 "(it also arrives by email). If nothing arrives within 10 minutes, send the same "
+                 "request once more from this same account: a code stays with the account that "
+                 "used it first. If it still does not arrive, send Andrew your GitHub username."),
     "format": ("This was not in the form of an enroll request, so nothing was done with it. "
                "Run /willoughby-apps:setup again with the code from Andrew's message."),
     "busy": ("This account has sent too many enroll requests today, so this one was not checked. "
@@ -128,12 +143,28 @@ def request_mark(code: str) -> str:
     return f"{MARK_PREFIX}{digest} -->"
 
 
-def presented_before(client, mark: str) -> bool:
-    """Whether any earlier request here carried this code (the job's own comments only)."""
+def owner_mark(code: str, account_id: str) -> str | None:
+    """The record of which account presented a code (GitHub's numeric user id,
+    which a rename does not move). None without a numeric id."""
+    if not (account_id or "").isdigit():
+        return None
+    digest = hashlib.sha256(b"willoughby-enroll-owner\n" + enroll_format.normalize_code(code).encode()
+                            + b"\n" + account_id.encode()).hexdigest()
+    return f"{OWNER_PREFIX}{digest} -->"
+
+
+def first_record(client, mark: str) -> str | None:
+    """The body of the job's own EARLIEST comment recording this code, or None
+    (the API lists a repo's issue comments oldest first)."""
     for c in client.paginate(f"/repos/{PIPELINE_REPO}/issues/comments"):
         if (c.get("user") or {}).get("login") == ACTIONS_BOT and mark in (c.get("body") or ""):
-            return True
-    return False
+            return c.get("body") or ""
+    return None
+
+
+def presented_before(client, mark: str) -> bool:
+    """Whether any earlier request here carried this code (the job's own comments only)."""
+    return first_record(client, mark) is not None
 
 
 # ----------------------------------------------------------- GitHub steps
@@ -169,7 +200,8 @@ def issue_fields(event_path: str) -> dict:
     """The fields redeem needs, from the `issues` event payload GitHub writes to disk."""
     issue = json.loads(Path(event_path).read_text()).get("issue") or {}
     return {"ISSUE_NUMBER": str(issue.get("number", "")), "ISSUE_TITLE": issue.get("title") or "",
-            "ISSUE_BODY": issue.get("body") or "", "ISSUE_AUTHOR": (issue.get("user") or {}).get("login") or ""}
+            "ISSUE_BODY": issue.get("body") or "", "ISSUE_AUTHOR": (issue.get("user") or {}).get("login") or "",
+            "ISSUE_AUTHOR_ID": str((issue.get("user") or {}).get("id") or "")}
 
 
 def comment_body(result: str, mark: str | None = None) -> str:
@@ -197,10 +229,14 @@ def redeem(client, env: dict, now: dt.datetime) -> tuple[str, str | None]:
         return "busy", None
     codes = load_codes(env.get("INVITE_CODES", ""))
     mark = request_mark(code)
-    repo = None if presented_before(client, mark) else lookup(codes, code)
-    # Posted before the invite step runs, so the code is spent before any
-    # invitation exists; a later request with it finds this comment.
-    comment(client, number, "received", mark)
+    owner = owner_mark(code, env.get("ISSUE_AUTHOR_ID", ""))
+    first = first_record(client, mark)
+    # A code presented before is spent, except for the account that presented
+    # it first (a failed invite must not cost the guest their code).
+    repo = lookup(codes, code) if first is None or (owner and owner in first) else None
+    # Posted before the invite step runs, so the code is spent for every other
+    # account before any invitation exists; a later request finds this comment.
+    comment(client, number, "received", mark + (f"\n{owner}" if owner else ""))
     return "received", repo
 
 

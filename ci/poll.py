@@ -24,6 +24,19 @@ Per guest, at most DAILY_CAP checks start per UTC day, counted from check.yml's
 own runs (their run-name carries the repo). Past the cap the commit gets a
 `pending` "Waiting" status and is picked up the next day.
 
+**A pipeline problem is retried, then reported (audit 2026-09-19).** An
+`error` of ours means Andrew's side failed (a fetch, a token, a runner, a
+scanner), and a `pending` "Queued" status that no run replaced within
+STALE_QUEUED means the run never reported at all. Either used to be final:
+the guest's Claude waited on a commit nothing would ever look at again, and
+nobody was told, since a run started by GITHUB_TOKEN notifies no person. Now
+such a commit is checked again, at most MAX_RETRIES times (tries are counted
+from check.yml's run names, `check <repo> <kind> <sha>`, over the last
+LOOKBACK_DAYS; each try counts towards the daily cap). When the last try
+fails too, poll opens a `needs-andrew` issue in the guest's repo that
+@mentions Andrew (ci/alert.py), then marks the commit `error` "Stopped:", which
+nothing retries.
+
 **Testers requests (PLAN section 1, 2026-09-19 decision c).** A guest's
 tester change takes effect only when Andrew approves it, so poll never hands
 a pushed `testers.txt` to the Mini. Instead, for each guest repo whose
@@ -48,6 +61,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ghapi import (APP_TOKEN_ENV, BOT_LOGIN, ORG, PIPELINE_REPO, REPO_NAME_RE, RESERVED_REPOS, SHA_RE, TAG_RE,  # noqa: E402
                    Client, GitHubError)
+import alert  # noqa: E402
 
 DAILY_CAP = 20
 CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release", "testers": "willoughby/testers-request"}
@@ -56,6 +70,12 @@ TESTERS_FILE = "testers.txt"
 # Mini's common/approvals.py TESTERS_ONLY_PATHS; a test pins the two).
 TESTERS_ONLY_PATHS = ("testers.txt", ".claude/settings.json", "CLAUDE.md")
 WAITING = "Waiting:"
+QUEUED = "Queued:"
+STOPPED = "Stopped:"
+MAX_RETRIES = 2                                   # so at most 3 runs per commit and kind
+STALE_QUEUED = dt.timedelta(minutes=90)           # a check takes 6 to 30 minutes
+ERROR_SETTLE = dt.timedelta(minutes=10)           # let a passing hiccup pass before trying again
+LOOKBACK_DAYS = 3
 MAX_BRANCHES = 30
 MAX_TAGS = 30
 
@@ -105,23 +125,62 @@ def needs_check(statuses: list[dict], context: str, login: str) -> bool:
     return s is None or (s.get("state") == "pending" and (s.get("description") or "").startswith(WAITING))
 
 
+def _age(status: dict, now: dt.datetime) -> dt.timedelta | None:
+    raw = status.get("updated_at") or status.get("created_at") or ""
+    try:
+        when = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return now - (when if when.tzinfo else when.replace(tzinfo=dt.timezone.utc))
+
+
+def decide(statuses: list[dict], context: str, login: str, now: dt.datetime, tries: int) -> str | None:
+    """What this commit needs in this context: "check" (never checked, or
+    waiting on the cap), "retry" (a pipeline problem, tries left), "give_up"
+    (a pipeline problem after the last try) or None."""
+    if needs_check(statuses, context, login):
+        return "check"
+    s = our_status(statuses, context, login)
+    state, desc = s.get("state"), s.get("description") or ""
+    age = _age(s, now)
+    if age is None:
+        return None
+    if state == "error" and not desc.startswith(STOPPED):
+        if age < ERROR_SETTLE:
+            return None
+    elif not (state == "pending" and desc.startswith(QUEUED) and age >= STALE_QUEUED):
+        return None
+    return "retry" if tries < 1 + MAX_RETRIES else "give_up"
+
+
 def run_name(repo: str, kind: str, sha: str) -> str:
     """Must match check.yml's `run-name`."""
     return f"check {repo} {kind} {sha}"
 
 
+def check_runs(pipeline: Client, repos: dict[str, str], today: dt.date) -> tuple[dict[str, int], dict[str, int]]:
+    """(checks started today per guest, runs per run name over LOOKBACK_DAYS),
+    both from check.yml's run names."""
+    counts: dict[str, int] = {}
+    tries: dict[str, int] = {}
+    since = today - dt.timedelta(days=LOOKBACK_DAYS - 1)
+    runs = pipeline.paginate(
+        f"/repos/{PIPELINE_REPO}/actions/workflows/check.yml/runs?created=>={since.isoformat()}",
+        key="workflow_runs", limit=3000)
+    for r in runs:
+        title = r.get("display_title") or ""
+        parts = title.split(" ")
+        if len(parts) == 4 and parts[0] == "check" and parts[1] in repos:
+            tries[title] = tries.get(title, 0) + 1
+            if (r.get("created_at") or today.isoformat())[:10] == today.isoformat():
+                guest = repos[parts[1]]
+                counts[guest] = counts.get(guest, 0) + 1
+    return counts, tries
+
+
 def checks_today(pipeline: Client, repos: dict[str, str], today: dt.date) -> dict[str, int]:
     """Checks started today per guest, from check.yml's run names."""
-    counts: dict[str, int] = {}
-    runs = pipeline.paginate(
-        f"/repos/{PIPELINE_REPO}/actions/workflows/check.yml/runs?created=>={today.isoformat()}",
-        key="workflow_runs", limit=2000)
-    for r in runs:
-        parts = (r.get("display_title") or "").split(" ")
-        if len(parts) == 4 and parts[0] == "check" and parts[1] in repos:
-            guest = repos[parts[1]]
-            counts[guest] = counts.get(guest, 0) + 1
-    return counts
+    return check_runs(pipeline, repos, today)[0]
 
 
 def testers_request(org: Client, repo: str, approved: str) -> str | None:
@@ -144,11 +203,13 @@ def testers_request(org: Client, repo: str, approved: str) -> str | None:
     return head
 
 
-def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -> list[tuple]:
+def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False,
+         now: dt.datetime | None = None) -> list[tuple]:
     login = BOT_LOGIN  # an installation token cannot call GET /user
+    now = now or dt.datetime.combine(today, dt.time(12, 0), dt.timezone.utc)
     props = repo_properties(org)
     repos = guest_repos(org, props)
-    counts = checks_today(pipeline, repos, today)
+    counts, tries = check_runs(pipeline, repos, today)
     actions = []
     for repo in sorted(repos):
         guest = repos[repo]
@@ -164,7 +225,24 @@ def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -
         for sha, kind, tag in found:
             context = CONTEXTS[kind]
             statuses = org.paginate(f"/repos/{ORG}/{repo}/commits/{sha}/statuses", limit=100)
-            if not needs_check(statuses, context, login):
+            n = tries.get(run_name(repo, kind, sha), 0)
+            what = decide(statuses, context, login, now, n)
+            if what is None:
+                continue
+            if what == "give_up":
+                actions.append(("alert", repo, sha, kind, tag))
+                if dry_run:
+                    continue
+                try:
+                    alert.notify(org, repo, sha, kind, tag, n)
+                except GitHubError as e:
+                    # Not marked Stopped, so the next poll tries to tell Andrew again.
+                    print(f"alert: {repo} not told (HTTP {e.status})")
+                    continue
+                org.post(f"/repos/{ORG}/{repo}/statuses/{sha}", {
+                    "state": "error", "context": context,
+                    "description": f"{STOPPED} {n} tries failed on Andrew's side. Andrew has been told.",
+                    "target_url": f"https://github.com/{PIPELINE_REPO}/actions/workflows/check.yml"})
                 continue
             if counts.get(guest, 0) >= DAILY_CAP:
                 if our_status(statuses, context, login) is None:
@@ -175,15 +253,16 @@ def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -
                             "description": f"{WAITING} {DAILY_CAP} checks ran today already. This one runs tomorrow."})
                 continue
             counts[guest] = counts.get(guest, 0) + 1
-            actions.append(("check", repo, sha, kind, tag))
+            actions.append(("check" if what == "check" else "retry", repo, sha, kind, tag))
             if dry_run:
                 continue
             pipeline.post(f"/repos/{PIPELINE_REPO}/actions/workflows/check.yml/dispatches", {
                 "ref": "main", "inputs": {"repo": repo, "sha": sha, "kind": kind, "tag": tag}})
             org.post(f"/repos/{ORG}/{repo}/statuses/{sha}", {
                 "state": "pending", "context": context,
-                "description": ("Queued: asking Andrew to approve the new tester list." if kind == "testers"
-                                else "Queued: checking and building this commit."),
+                "description": (f"{QUEUED} asking Andrew to approve the new tester list." if kind == "testers"
+                                else f"{QUEUED} checking and building this commit.")
+                               + (f" Try {n + 1} of {1 + MAX_RETRIES}." if what == "retry" else ""),
                 "target_url": f"https://github.com/{PIPELINE_REPO}/actions/workflows/check.yml"})
     return actions
 
@@ -212,13 +291,17 @@ def main(argv=None) -> int:
         print(f"{len(names)} guest repo(s)")
         return 0
     pipeline = Client.from_env("GITHUB_TOKEN")
-    actions = poll(org, pipeline, dt.datetime.now(dt.timezone.utc).date(), args.dry_run)
-    started = sum(1 for a in actions if a[0] == "check")
+    now = dt.datetime.now(dt.timezone.utc)
+    actions = poll(org, pipeline, now.date(), args.dry_run, now)
+    started = sum(1 for a in actions if a[0] in ("check", "retry"))
+    retried = sum(1 for a in actions if a[0] == "retry")
     waiting = sum(1 for a in actions if a[0] == "wait")
-    testers = sum(1 for a in actions if a[0] == "check" and a[3] == "testers")
+    alerted = sum(1 for a in actions if a[0] == "alert")
+    testers = sum(1 for a in actions if a[0] in ("check", "retry") and a[3] == "testers")
     # Counts only: repo names and SHAs are not secret, but nothing guest-written is printed.
-    print(f"{'would start' if args.dry_run else 'started'} {started} check(s), {testers} of them tester-list "
-          f"requests; {waiting} waiting on the daily cap")
+    print(f"{'would start' if args.dry_run else 'started'} {started} check(s), {retried} of them retries after "
+          f"a pipeline problem and {testers} tester-list requests; {waiting} waiting on the daily cap; "
+          f"{alerted} given up and reported to Andrew")
     return 0
 
 

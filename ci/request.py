@@ -12,7 +12,12 @@ tag, start the review.
    approves or rejects it from the Willoughby TestFlight page (PLAN section 5).
    Each label is created first when the repo lacks it (422 = it exists).
 2. For a tag, dispatches `guest-review.yml` on ajcohen9/willoughby with the
-   same pins, so the advisory review is posted on the issue.
+   same pins, so the advisory review is posted on the issue. A refused
+   dispatch (an expired or missing MONOREPO_DISPATCH token: fine-grained PATs
+   default to 30 days) never fails the run: Approve and guest-sign both need
+   this check.yml run to have succeeded, so a dead token would have made every
+   release unapprovable (audit 2026-09-19). Instead the issue gets a comment
+   that @mentions Andrew with the HTTP status.
 
 The body @mentions ANDREW, so GitHub notifies him (he owns the org, so he can
 read every guest repo), and carries the check's images from the previews ref
@@ -21,7 +26,7 @@ for the Willoughby page, in a machine-readable block
 
     <!-- willoughby-previews v1
     {"sha": ..., "tag": ..., "previews_commit": ...,
-     "screenshot": {"url": ..., "api": ...} | null, "icon": {...} | null}
+     "screenshot": {"url": ..., "api": ..., "ref": ...} | null, "icon": {...} | null}
     -->
 
 **What changed since Andrew's last approval** (PLAN section 1, 2026-09-19
@@ -78,7 +83,7 @@ CHANGES_BLOCK_DOC = """
  "base_sha": "<40 hex, the last approved commit>" | null,
  "run_id": "<the check.yml run>",
  "diff_url": "https://github.com/willoughby-apps/<repo>/compare/<base>...<sha>" | ".../commit/<sha>",
- "previews": {"screenshot": {"url", "api"} | null, "icon": {"url", "api"} | null} | null,
+ "previews": {"screenshot": {"url", "api", "ref"} | null, "icon": {"url", "api", "ref"} | null} | null,
  "review": {"requested": true | false, "marker": "<!-- willoughby-review sha=<sha> -->"},
  "summary": "ok" | "unavailable",
  "files": {"changed": n, "paths": [str], "truncated": bool} | null,
@@ -113,7 +118,7 @@ def previews(repo: str, sha: str, commit: str, screenshot: str, icon: str) -> di
     for name, path in (("screenshot", screenshot), ("icon", icon)):
         if path and path == want[name]:
             out[name] = {"url": f"https://github.com/{ORG}/{repo}/blob/{commit}/{path}?raw=true",
-                         "api": f"repos/{ORG}/{repo}/contents/{path}?ref={commit}"}
+                         "api": f"repos/{ORG}/{repo}/contents/{path}", "ref": commit}
     return out if (out["screenshot"] or out["icon"]) else None
 
 
@@ -411,16 +416,34 @@ def main() -> int:
     print(f"{'testers' if kind == 'testers' else 'release'} request is issue #{number}")
     if kind == "testers":
         return 0
-    mono = Client.from_env("MONOREPO_DISPATCH")
-    try:
-        mono.post(f"/repos/{MONOREPO}/actions/workflows/{REVIEW_WORKFLOW}/dispatches", {
-            "ref": "main",
-            "inputs": {"repo": f"{ORG}/{repo}", "sha": sha, "tag": tag, "issue": str(number), "run_id": run_id,
-                       "source_sha256": source}})
-    except GitHubError as e:
-        raise SystemExit(f"could not start {REVIEW_WORKFLOW} on {MONOREPO}: HTTP {e.status}") from None
-    print(f"dispatched {REVIEW_WORKFLOW}")
+    problem = None
+    if not os.environ.get("MONOREPO_DISPATCH"):
+        problem = "the MONOREPO_DISPATCH secret is not set"
+    else:
+        try:
+            Client.from_env("MONOREPO_DISPATCH").post(
+                f"/repos/{MONOREPO}/actions/workflows/{REVIEW_WORKFLOW}/dispatches", {
+                    "ref": "main",
+                    "inputs": {"repo": f"{ORG}/{repo}", "sha": sha, "tag": tag, "issue": str(number),
+                               "run_id": run_id, "source_sha256": source}})
+        except GitHubError as e:
+            problem = f"GitHub answered HTTP {e.status}" + (
+                " (the MONOREPO_DISPATCH token has probably expired or lost Actions write)"
+                if e.status in (401, 403, 404) else "")
+    if problem is None:
+        print(f"dispatched {REVIEW_WORKFLOW}")
+        return 0
+    print(f"warning: could not start {REVIEW_WORKFLOW} on {MONOREPO}; told Andrew on the issue")
+    org.post(f"/repos/{ORG}/{repo}/issues/{number}/comments", {"body": review_problem_comment(problem)})
     return 0
+
+
+def review_problem_comment(problem: str) -> str:
+    return "\n".join([
+        f"@{ANDREW}: the safety review for this release could not be started: {problem}. "
+        "Nothing is wrong with the app. The release can still be approved; to get the review, renew the "
+        "token in the pipeline's secrets and run check.yml again for this tag.",
+    ])
 
 
 if __name__ == "__main__":

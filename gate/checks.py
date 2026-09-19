@@ -985,6 +985,52 @@ def check_transport_security(ctx: Context, spec: ProjectSpec | None):
                      f"{file} sets {k} under {ATS_KEY}, which is not allowed.")
 
 
+# -------------------------------------------------------- export compliance
+
+EXPORT_KEY = "ITSAppUsesNonExemptEncryption"
+_FALSE = {"no", "false", "0"}
+
+
+def _is_false(value) -> bool:
+    if isinstance(value, bool):
+        return value is False
+    return isinstance(value, (str, int)) and str(value).strip().lower() in _FALSE
+
+
+def check_export_compliance(ctx: Context, spec: ProjectSpec | None):
+    """`ITSAppUsesNonExemptEncryption` must be declared false in the app's
+    Info.plist sources (the template has it in the target's info properties),
+    and no source may say anything else. Without it an upload waits in
+    MISSING_EXPORT_COMPLIANCE, and no tester, internal ones included, can
+    install it until Andrew answers in App Store Connect (audit 2026-09-19).
+    Apple: "a Boolean value indicating whether the app uses encryption"
+    (ITSAppUsesNonExemptEncryption, Information Property List)."""
+    if spec is None:
+        return
+    ptl = ctx.policy["project_yml"]["path"]
+    sources, declared = [], False  # (value, file, line)
+    for key, value, line, _ in spec.settings:
+        if str(key) == "INFOPLIST_KEY_" + EXPORT_KEY:
+            sources.append((value, ptl, line))
+    if EXPORT_KEY in spec.info_properties:
+        value, line = spec.info_properties[EXPORT_KEY]
+        sources.append((value, ptl, line))
+        declared = True
+    plists = {ctx.find(p) for p, _ in spec.referenced_paths.get("info", [])} - {None}
+    for rel in sorted(plists):
+        value, err = _read_plist(ctx, rel)
+        if not err and EXPORT_KEY in value:
+            sources.append((value[EXPORT_KEY], rel, None))
+            declared = True
+    for value, file, line in sources:
+        if not _is_false(value):
+            ctx.fail("project_yml.export_compliance", file, line,
+                     f"{file} sets {EXPORT_KEY} to {str(value)[:40]!r}; it must be false.")
+    if not declared:
+        ctx.fail("project_yml.export_compliance", ptl, None,
+                 f"{ptl}: the app target's info properties do not declare {EXPORT_KEY}: false.")
+
+
 # ------------------------------------------------------------------ app icon
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -1093,5 +1139,6 @@ def run_static_checks(ctx: Context):
         # already a hard failure, and guessing here would only add noise.
         check_info_and_usage(ctx, spec)
     check_transport_security(ctx, spec)
+    check_export_compliance(ctx, spec)
     check_app_icon(ctx)
     return spec

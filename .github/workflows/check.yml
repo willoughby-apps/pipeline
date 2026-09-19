@@ -326,7 +326,10 @@ jobs:
         with:
           name: archive
           path: ${{ runner.temp }}/up/archive.age
-          retention-days: 7
+          # What guest-sign re-signs after Andrew approves. 7 days made a
+          # later approval fail at signing (audit 2026-09-19); 30 covers a
+          # month's wait and is still well short of the public-repo limit (90).
+          retention-days: 30
           if-no-files-found: error
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
