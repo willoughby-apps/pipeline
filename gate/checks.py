@@ -36,6 +36,8 @@ class Context:
     failures: list = field(default_factory=list)
     # repo-relative posix path -> bytes, for every regular file under the caps
     contents: dict = field(default_factory=dict)
+    # The main app icon that passed app_icon.invalid (repo-relative), for the report.
+    app_icon: str | None = None
 
     def fail(self, rule: str, file: str | None, line: int | None, detail: str):
         if rule not in self.policy.rules:
@@ -983,6 +985,90 @@ def check_transport_security(ctx: Context, spec: ProjectSpec | None):
                      f"{file} sets {k} under {ATS_KEY}, which is not allowed.")
 
 
+# ------------------------------------------------------------------ app icon
+
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_COLOR_TYPES = {0: "greyscale", 2: "RGB", 3: "palette colour", 4: "greyscale with transparency",
+                   6: "RGB with transparency (an alpha channel)"}
+
+
+def png_header(data: bytes) -> tuple[dict | None, str | None]:
+    """(IHDR fields plus `trns`, None) or (None, why not). Reads the signature,
+    the IHDR chunk and every chunk header before the first IDAT, as data."""
+    if not data.startswith(PNG_SIGNATURE):
+        return None, "is not a PNG"
+    pos = len(PNG_SIGNATURE)
+    if len(data) < pos + 8 + 13 or data[pos:pos + 8] != b"\x00\x00\x00\x0dIHDR":
+        return None, "is a PNG without a readable header"
+    w, h = int.from_bytes(data[pos + 8:pos + 12], "big"), int.from_bytes(data[pos + 12:pos + 16], "big")
+    fields = {"width": w, "height": h, "bit_depth": data[pos + 16], "color_type": data[pos + 17], "trns": False}
+    pos += 8 + 13 + 4
+    while pos + 8 <= len(data):
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        kind = data[pos + 4:pos + 8]
+        if kind == b"IDAT" or kind == b"IEND":
+            return fields, None
+        if kind == b"tRNS":
+            fields["trns"] = True
+        pos += 12 + length
+    return None, "is a PNG that ends before its image data"
+
+
+def check_app_icon(ctx: Context):
+    pol = ctx.policy["app_icon"]
+    size = int(pol["size"])
+    color_types = {int(c) for c in pol["color_types"]}
+    depths = {int(d) for d in pol["bit_depths"]}
+    sets = sorted(rel for rel in ctx.contents
+                  if fold_name(rel.rsplit("/", 1)[-1]) == "contents.json" and "/" in rel
+                  and fold_name(rel.rsplit("/", 2)[-2]).endswith(".appiconset"))
+    for contents_rel in sets:
+        set_dir = contents_rel.rsplit("/", 1)[0]
+        try:
+            doc = json.loads(ctx.contents[contents_rel].decode("utf-8-sig"))
+            images = doc.get("images") if isinstance(doc, dict) else None
+            if images is None:
+                images = []
+            if not isinstance(images, list):
+                raise ValueError("images is not a list")
+        except (ValueError, UnicodeDecodeError) as e:
+            ctx.fail("app_icon.invalid", contents_rel, None, f"{contents_rel} could not be read ({str(e)[:80]}).")
+            continue
+        for entry in images:
+            if not isinstance(entry, dict) or "filename" not in entry:
+                continue
+            name = entry["filename"]
+            if not isinstance(name, str) or not name or "/" in name or "\\" in name or name in (".", ".."):
+                ctx.fail("app_icon.invalid", contents_rel, None,
+                         f"{contents_rel} names an icon file {str(name)[:80]!r} that is not a plain file name.")
+                continue
+            rel = ctx.find(f"{set_dir}/{name}")
+            if rel is None:
+                ctx.fail("app_icon.invalid", contents_rel, None,
+                         f"{contents_rel} names {name}, which is not in {set_dir}.")
+                continue
+            header, why = png_header(ctx.contents[rel])
+            if header is None:
+                ctx.fail("app_icon.invalid", rel, None, f"{rel} {why}.")
+                continue
+            problems = []
+            if (header["width"], header["height"]) != (size, size):
+                problems.append(f"is {header['width']}x{header['height']} pixels, not {size}x{size}")
+            variant = bool(entry.get("appearances"))
+            if not variant:
+                if header["color_type"] not in color_types:
+                    problems.append("is " + PNG_COLOR_TYPES.get(header["color_type"], "an unknown colour type")
+                                    + ", not RGB without transparency")
+                elif header["trns"]:
+                    problems.append("has a transparent colour (a tRNS chunk)")
+                if header["bit_depth"] not in depths:
+                    problems.append(f"has {header['bit_depth']}-bit samples")
+            if problems:
+                ctx.fail("app_icon.invalid", rel, None, f"{rel} " + " and ".join(problems) + ".")
+            elif not variant and ctx.app_icon is None:
+                ctx.app_icon = rel
+
+
 # ------------------------------------------------------------------ bundle
 
 
@@ -1007,4 +1093,5 @@ def run_static_checks(ctx: Context):
         # already a hard failure, and guessing here would only add noise.
         check_info_and_usage(ctx, spec)
     check_transport_security(ctx, spec)
+    check_app_icon(ctx)
     return spec

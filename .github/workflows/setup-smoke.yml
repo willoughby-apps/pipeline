@@ -10,6 +10,11 @@
 # and Claude sign-in needs a paid plan. Runner images already carry git and
 # gh, so each step reports what it found and what the install left.
 #
+# Since 2026-09-19 it also checks the one-paste setup (setup.md is where the
+# paste reads it) and the icon skill's no-install tools: the Mac `sips` and
+# `qlmanage` steps, and on Windows the plugin's icon.ps1 (System.Drawing) and
+# Edge drawing an SVG.
+#
 # No secret, no token (permissions: {}), no action: nothing here reads a
 # guest repo.
 name: setup-smoke
@@ -61,6 +66,47 @@ jobs:
           claude plugin install willoughby-apps@willoughby-apps
           claude plugin list
 
+      - name: setup.md where the one paste reads it
+        run: |
+          set -euo pipefail
+          guide="$HOME/.claude/plugins/marketplaces/willoughby-apps/setup.md"
+          test -f "$guide"
+          head -5 "$guide"
+
+      - name: Icon from sips (the icon skill's Mac steps, an RGBA picture that is not square)
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          python3 - "$work/wide.png" <<'PY'
+          import struct, sys, zlib
+          w, h = 600, 300
+          rows = b"".join(b"\x00" + b"".join(bytes([x % 256, y % 256, 90, 120]) for x in range(w)) for y in range(h))
+          def chunk(k, d): return struct.pack(">I", len(d)) + k + d + struct.pack(">I", zlib.crc32(k + d))
+          open(sys.argv[1], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+                                        + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+          PY
+          sips -p 600 600 --padColor 2A6F97 "$work/wide.png" --out "$work/square.png"
+          sips -z 1024 1024 "$work/square.png" --out "$work/sized.png"
+          sips -s format jpeg -s formatOptions best "$work/sized.png" --out "$work/flat.jpg"
+          sips -m "/System/Library/ColorSync/Profiles/sRGB Profile.icc" "$work/flat.jpg" --out "$work/srgb.jpg"
+          sips -s format png "$work/srgb.jpg" --out "$work/AppIcon.png"
+          sips -g pixelWidth -g pixelHeight -g hasAlpha "$work/AppIcon.png"
+          python3 - "$work/AppIcon.png" <<'PY'
+          import struct, sys
+          d = open(sys.argv[1], "rb").read()
+          w, h, depth, ctype = struct.unpack(">IIBB", d[16:26])
+          print("png", d[:8] == b"\x89PNG\r\n\x1a\n", w, h, depth, ctype)
+          assert d[:8] == b"\x89PNG\r\n\x1a\n" and (w, h, ctype) == (1024, 1024, 2) and b"tRNS" not in d[:d.index(b"IDAT")]
+          PY
+
+      - name: A described icon, drawn as SVG and rendered with qlmanage
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><rect width="1024" height="1024" fill="#2a6f97"/><circle cx="512" cy="512" r="300" fill="#fff"/></svg>' > "$work/icon.svg"
+          qlmanage -t -s 1024 -o "$work" "$work/icon.svg"
+          sips -g pixelWidth -g pixelHeight "$work/icon.svg.png"
+
   windows:
     runs-on: windows-2025
     timeout-minutes: 30
@@ -103,3 +149,40 @@ jobs:
           claude plugin marketplace add willoughby-apps/start
           claude plugin install willoughby-apps@willoughby-apps
           claude plugin list
+
+      - name: setup.md where the one paste reads it
+        run: |
+          $guide = "$env:USERPROFILE\.claude\plugins\marketplaces\willoughby-apps\setup.md"
+          if (-not (Test-Path -LiteralPath $guide)) { throw "no setup.md at $guide" }
+          Get-Content -LiteralPath $guide -TotalCount 5
+
+      - name: Icon from the plugin's icon.ps1 (Windows PowerShell 5.1, an ARGB picture that is not square)
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP icon
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          Add-Type -AssemblyName System.Drawing
+          $src = New-Object System.Drawing.Bitmap 600, 300, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+          $g = [System.Drawing.Graphics]::FromImage($src)
+          $g.Clear([System.Drawing.Color]::FromArgb(120, 200, 40, 90))
+          $g.Dispose()
+          $src.Save("$work\wide.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $src.Dispose()
+          $script = "$env:USERPROFILE\.claude\plugins\marketplaces\willoughby-apps\plugins\willoughby-apps\scripts\icon.ps1"
+          powershell -NoProfile -ExecutionPolicy Bypass -File $script -In "$work\wide.png" -Out "$work\AppIcon.png" -Fit pad -Background 2A6F97
+          if ($LASTEXITCODE -ne 0) { throw "icon.ps1 exited $LASTEXITCODE" }
+          python -c "import struct,sys; d=open(sys.argv[1],'rb').read(); w,h,depth,ct=struct.unpack('>IIBB',d[16:26]); print('png',w,h,depth,ct); assert d[1:4]==b'PNG' and (w,h,ct)==(1024,1024,2) and b'tRNS' not in d[:d.index(b'IDAT')]" "$work\AppIcon.png"
+          if ($LASTEXITCODE -ne 0) { throw "the icon is not a 1024x1024 RGB PNG" }
+
+      - name: A described icon, drawn as SVG and rendered with Edge (the icon skill's Windows route)
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP svg
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          Set-Content -LiteralPath "$work\icon.svg" -Encoding ascii -Value '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><rect width="1024" height="1024" fill="#2a6f97"/><circle cx="512" cy="512" r="300" fill="#fff"/></svg>'
+          $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          $url = "file:///" + ("$work\icon.svg" -replace '\\', '/')
+          $p = Start-Process -FilePath $edge -ArgumentList @('--headless', '--disable-gpu', '--hide-scrollbars', '--window-size=1024,1024', "--screenshot=$work\icon-svg.png", $url) -Wait -PassThru
+          "edge exit code: $($p.ExitCode)"
+          if (-not (Test-Path -LiteralPath "$work\icon-svg.png")) { throw "Edge wrote no screenshot" }
+          $script = "$env:USERPROFILE\.claude\plugins\marketplaces\willoughby-apps\plugins\willoughby-apps\scripts\icon.ps1"
+          powershell -NoProfile -ExecutionPolicy Bypass -File $script -In "$work\icon-svg.png" -Out "$work\AppIcon.png"
+          if ($LASTEXITCODE -ne 0) { throw "icon.ps1 exited $LASTEXITCODE" }

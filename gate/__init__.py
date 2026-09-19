@@ -50,4 +50,6 @@ def check_repo(repo, bundle_id: str, policy: Policy | None = None,
         "policy_sha256": policy.sha256,
         "hard_failures": failures,
         "scanners": section,
+        # The main app icon, repo-relative, when it passed app_icon.invalid (the report shows it).
+        "app_icon": ctx.app_icon if not any(f["rule"] == "app_icon.invalid" for f in failures) else None,
     }

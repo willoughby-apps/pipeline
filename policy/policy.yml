@@ -268,6 +268,20 @@ dependencies:
   allowlist: []
   resolved_path: Package.resolved
 
+app_icon:
+  # Every image an `.appiconset/Contents.json` names, read as data (the PNG
+  # signature and IHDR header, then the chunks before the first IDAT).
+  # Apple's HIG (app-icons, read 2026-09-19): iOS icons are a 1024x1024 px
+  # square the system masks to a rounded rectangle, in sRGB, Display P3 or
+  # Gray Gamma 2.2. App Store Connect refuses an upload whose App Store icon
+  # "can't be transparent nor contain an alpha channel" (ITMS-90717). So the
+  # main icon (an entry with no `appearances`) must be a PNG, exactly this
+  # size, RGB (colour type 2) with no alpha channel and no tRNS chunk; a dark
+  # or tinted variant (an entry with `appearances`) must be a PNG of this size.
+  size: 1024
+  color_types: [2]          # 2 = RGB; 6 (RGB + alpha), 4 (grey + alpha), 3 (palette) refused
+  bit_depths: [8, 16]
+
 entitlements:
   # Entitlement keys Andrew has enabled, per approved bundle id. An app not
   # listed here may have no entitlements at all.
@@ -453,6 +467,10 @@ rules:
     guest_rule: "Your app's bundle ID is set by Andrew when he approves the app. Never change it."
     plain_english: "The app's bundle ID is not one Andrew approved."
     fix_for_claude: "Set PRODUCT_BUNDLE_IDENTIFIER in project.yml to exactly the approved bundle ID and do not change it again."
+  - id: app_icon.invalid
+    guest_rule: "The app icon is a square PNG of exactly 1024 by 1024 pixels with no transparency (no alpha channel). Make one with /willoughby-apps:icon."
+    plain_english: "The app icon is not a 1024 by 1024 PNG without transparency, which Apple needs before the app can go to TestFlight."
+    fix_for_claude: "Remake the icon with /willoughby-apps:icon (it writes a 1024x1024 RGB PNG with no alpha), save it as the file the appiconset's Contents.json names, and keep that name."
   - id: project_yml.missing
     guest_rule: "The app is described by `project.yml` at the top of the repo. Keep it there."
     plain_english: "There is no project.yml at the top of the repo, so the app cannot be built."

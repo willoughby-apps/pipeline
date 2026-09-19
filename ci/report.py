@@ -6,7 +6,7 @@
 REPORTS_DIR holds what the gate, build and preview jobs encrypted to the
 pipeline key, already decrypted by the workflow:
 
-    gate/gate.json, gate/gate.txt, gate/unpack.txt
+    gate/gate.json, gate/gate.txt, gate/unpack.txt   (gate.json's app_icon: the icon shown)
     build/result.json, build/build.log
     preview/result.json, preview/screenshot.png, preview/preview.log
 
@@ -127,15 +127,51 @@ def verdict(env: dict, reports: Path) -> dict:
             "sections": sections}
 
 
-def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | None) -> str:
+# The icon's path comes from gate.json, which names a file in the guest repo:
+# only plain path characters reach the comment, each segment URL-quoted, never
+# `..`, so it cannot close the HTML attribute or point anywhere else.
+ICON_PATH_RE = re.compile(r"[A-Za-z0-9._ /-]{1,300}")
+
+
+def icon_path(reports: Path) -> str | None:
+    gate = _load_json(reports / "gate/gate.json")
+    path = (gate or {}).get("app_icon")
+    if not (isinstance(path, str) and ICON_PATH_RE.fullmatch(path) and path.lower().endswith(".png")):
+        return None
+    parts = path.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return None
+    return path
+
+
+def icon_links(repo: str, sha: str, path: str) -> tuple[str, str]:
+    """(an image URL for the comment, the `gh api` path Claude fetches it with)."""
+    from urllib.parse import quote
+    q = "/".join(quote(p) for p in path.split("/"))
+    return (f"https://github.com/{ORG}/{repo}/blob/{sha}/{q}?raw=true",
+            f"repos/{ORG}/{repo}/contents/{q}?ref={sha}")
+
+
+def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | None,
+                 icon: tuple[str, str] | None = None) -> str:
     kind = env.get("KIND")
     title = f"Release check for {env.get('TAG')}" if kind == "tag" else "Check"
     parts = [f"**{title}: {v['headline']}**", ""]
     for heading, body in v["sections"]:
         parts += [f"{heading}:", "```text", body, "```", ""]
+    if icon and image_url:
+        parts += ["The app icon and a screenshot from the iPhone simulator:", "",
+                  "| App icon | Screenshot |", "|:---:|:---:|",
+                  f'| <img src="{icon[0]}" width="120" alt="app icon"> '
+                  f'| <img src="{image_url}" width="300" alt="screenshot"> |', ""]
+    elif icon:
+        parts += ["The app icon:", "", f'<img src="{icon[0]}" width="120" alt="app icon">', ""]
+    elif image_url:
+        parts += ["Screenshot from the iPhone simulator:", "", f"![screenshot]({image_url})", ""]
     if image_url:
-        parts += ["Screenshot from the iPhone simulator:", "", f"![screenshot]({image_url})", "",
-                  f"Claude can fetch it with: `gh api {image_api} -H 'Accept: application/vnd.github.raw' > screenshot.png`", ""]
+        parts += [f"Claude can fetch it with: `gh api {image_api} -H 'Accept: application/vnd.github.raw' > screenshot.png`", ""]
+    if icon:
+        parts += [f"And the icon with: `gh api {icon[1]} -H 'Accept: application/vnd.github.raw' > icon.png`", ""]
     parts += [f"Pipeline run: {env.get('RUN_URL')}"]
     return "\n".join(parts)[:MAX_COMMENT_CHARS]
 
@@ -205,7 +241,10 @@ def main(argv=None) -> int:
     client.post(f"/repos/{ORG}/{repo}/statuses/{sha}", {
         "state": v["state"], "context": CONTEXTS[kind], "description": v["description"][:140],
         "target_url": env.get("RUN_URL")})
-    client.post(f"/repos/{ORG}/{repo}/commits/{sha}/comments", {"body": comment_body(v, env, image_url, image_api)})
+    path = icon_path(reports)
+    icon = icon_links(repo, sha, path) if path else None
+    client.post(f"/repos/{ORG}/{repo}/commits/{sha}/comments",
+                {"body": comment_body(v, env, image_url, image_api, icon)})
     ok = v["state"] == "success"
     out = env.get("GITHUB_OUTPUT")
     if out:
