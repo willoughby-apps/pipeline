@@ -930,6 +930,19 @@ def check_info_and_usage(ctx: Context, spec: ProjectSpec | None):
             if m:
                 needed[req["key"]] = (req["what"], rel, _line_of(swift[rel], m.start()))
                 break
+        if req["key"] in needed or not req.get("api_together"):
+            continue
+        # `api_together`: every pattern matches in some Swift file (not
+        # necessarily the same one); reported where the last one matches.
+        where = None
+        for pattern in req["api_together"]:
+            rx = re.compile(pattern)
+            where = next(((rel, m) for rel in sorted(swift) for m in [rx.search(swift[rel])] if m), None)
+            if where is None:
+                break
+        if where is not None:
+            rel, m = where
+            needed[req["key"]] = (req["what"], rel, _line_of(swift[rel], m.start()))
     for key, (what, rel, line) in sorted(needed.items()):
         value = declared.get(key)
         if value is None or not _norm(value[0]):

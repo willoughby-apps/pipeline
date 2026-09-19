@@ -296,8 +296,15 @@ usage_descriptions:
     - key: NSCameraUsageDescription
       what: the camera
       # Also the usual picker setup, which names `.camera` after `sourceType`
-      # (`picker.sourceType = .camera`, `isSourceTypeAvailable(.camera)`); audit 2026-09-19.
-      api: '\b(AVCaptureDevice|AVCaptureSession|UIImagePickerController\.SourceType\.camera|\.camera\b.*sourceType|DataScannerViewController)\b|\bsourceType\s*=\s*(UIImagePickerController\.SourceType)?\.camera\b|\bisSourceTypeAvailable\s*\(\s*(UIImagePickerController\.SourceType)?\.camera\s*\)'
+      # (`picker.sourceType = .camera`, `isSourceTypeAvailable(.camera)`, and
+      # the SwiftUI wrapper's call `ImagePicker(sourceType: .camera)`); audit
+      # 2026-09-19.
+      api: '\b(AVCaptureDevice|AVCaptureSession|UIImagePickerController\.SourceType\.camera|\.camera\b.*sourceType|DataScannerViewController)\b|\bsourceType\s*[:=]\s*(UIImagePickerController\.SourceType)?\.camera\b|\bisSourceTypeAvailable\s*\(\s*(UIImagePickerController\.SourceType)?\.camera\s*\)'
+      # Every pattern here matching somewhere in the app's Swift, each in any
+      # file, also counts: a wrapper sets `picker.sourceType = sourceType` in
+      # one file and passes `.camera` from another (review 2026-09-19), so a
+      # picker anywhere plus `.camera` anywhere is the camera.
+      api_together: ['\bUIImagePickerController\b', '(?<![\w"])\.camera\b']
     - key: NSMicrophoneUsageDescription
       what: the microphone
       api: '\b(AVAudioRecorder|requestRecordPermission|AVAudioApplication\.requestRecordPermission|SFSpeechAudioBufferRecognitionRequest)\b'
