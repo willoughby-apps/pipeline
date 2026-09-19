@@ -91,6 +91,8 @@ def main(argv=None) -> int:
     validate_inputs(repo, sha, kind, tag)
     client = Client.from_env(APP_TOKEN_ENV)
     bundle_id = resolve_bundle_id(app_properties(client, repo))
+    for out in argv:  # the handoff folder does not exist on a fresh runner (first live run, 2026-09-18)
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
     try:
         tree_sha = verify_commit(client, repo, sha, kind, tag)
         size = client.download(f"/repos/{ORG}/{repo}/tarball/{sha}", argv[0], MAX_TARBALL_BYTES)
