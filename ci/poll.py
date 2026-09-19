@@ -4,7 +4,7 @@
     APP_TOKEN=... GITHUB_TOKEN=... python3 ci/poll.py [--dry-run]
 
 poll.yml runs it twice, each with its own app token: first a token with only
-organization custom properties read (no repository permission at all) lists
+organization custom properties read and metadata read lists
 the guest repos, then a token limited to exactly those repos (contents read,
 statuses write, organization custom properties read) polls them. Neither can
 reach `pipeline` with any write permission.

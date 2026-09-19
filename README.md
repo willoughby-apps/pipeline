@@ -59,7 +59,7 @@ The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
 
 | Job | Repositories | Permissions |
 |---|---|---|
-| `poll` (1st token) | none named (org-level only) | organization custom properties read: lists the guest repos |
+| `poll` (1st token) | none named (all, read-only) | organization custom properties read, metadata read: lists the guest repos (without metadata the token is scoped to no repo and sees only this public one: measured 2026-09-18) |
 | `poll` (2nd token) | exactly the guest repos the 1st listed | contents read, commit statuses write, organization custom properties read |
 | `fetch` | the one guest repo (`inputs.repo`, validated first) | contents read, metadata read |
 | `report` | the one guest repo | contents write (the previews ref, the commit comment), commit statuses write, metadata read |
@@ -141,7 +141,7 @@ main is as good as both secrets. A repository ruleset blocks creating,
 updating, deleting and force-pushing the default branch for everyone but
 Andrew's own user, and no app token minted here names this repo in its
 `repositories` (the one that names no repo carries only organization custom
-properties read). The app's private key itself could mint a wider token (the
+properties read and metadata read). The app's private key itself could mint a wider token (the
 app is installed on every org repo and holds Administration write), which is
 why only `fetch`, `report` and `request` reference it, each installs nothing
 but the pinned `age`, and the ruleset's bypass list is Andrew's user alone, not

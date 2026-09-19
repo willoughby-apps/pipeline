@@ -36,7 +36,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: App token that can only read the org's custom properties
+      # Metadata read is needed as well: measured 2026-09-18, a token with only
+      # organization custom properties is scoped to zero repos and lists only
+      # the public pipeline repo's properties.
+      - name: App token that can only read the org's custom properties and repo metadata
         id: list-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -44,6 +47,7 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: willoughby-apps
           permission-organization-custom-properties: read
+          permission-metadata: read
 
       - name: List the guest repos
         id: list
