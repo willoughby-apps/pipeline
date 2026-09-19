@@ -51,7 +51,7 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 
 | Secret | Used by | Scope |
 |---|---|---|
-| `APP_PRIVATE_KEY` (+ variable `APP_CLIENT_ID`) | `poll`, `fetch`, `report`, `request` | the private key of the GitHub App **willoughby-apps-bot** (client ID `Iv23liiTpvQBZ5cbNj7a`, installed on the org). Never used directly: each of those jobs mints its own installation token with `actions/create-github-app-token`, **limited to the one guest repo** it works on and to the permissions that job needs (table below), and the token is revoked when the job ends. |
+| `APP_PRIVATE_KEY` (+ variable `APP_CLIENT_ID`) | `poll`, `fetch`, `report`, `request` | the private key of the GitHub App **willoughby-apps-bot** (client ID `Iv23liiTpvQBZ5cbNj7a`, installed on the guest repos only, never this one). Never used directly: each of those jobs mints its own installation token with `actions/create-github-app-token`, **limited to the one guest repo** it works on and to the permissions that job needs (table below), and the token is revoked when the job ends. |
 | `MONOREPO_DISPATCH` | `request` | fine-grained PAT on `ajcohen9/willoughby`: Actions write. |
 | `PIPELINE_PRIVATE_KEY` | `report` | the age identity for `keys/pipeline.age.pub` (`guest-apps/scripts/pipeline_keypair.sh`). The Mini holds the same key to decrypt the unsigned build. |
 
@@ -65,9 +65,10 @@ The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
 | `report` | the one guest repo | contents write (the previews ref, the commit comment), commit statuses write, metadata read |
 | `request` | the one guest repo | issues write, metadata read |
 
-The app itself has Administration write (onboarding and the future enroll job
-add collaborators with it), but no token minted here asks for it, and no token
-here names this repo, `app-template` or `start`. The pipeline's statuses,
+The app itself has Administration write (the future enroll job adds
+collaborators with it), but no token minted here asks for it, and no token
+here names this repo, `app-template` or `start`, where the app is not
+installed at all. The pipeline's statuses,
 comments and issues are therefore written by **`willoughby-apps-bot[bot]`**
 (`ci/ghapi.py BOT_LOGIN`, checked against `GET /users/willoughby-apps-bot[bot]`
 on 2026-09-18: a `Bot`, id 331092058), and that login is what every consumer
@@ -139,13 +140,23 @@ never used at all.
 `PIPELINE_PRIVATE_KEY` and `MONOREPO_DISPATCH` in the environment, so a push to
 main is as good as both secrets. A repository ruleset blocks creating,
 updating, deleting and force-pushing the default branch for everyone but
-Andrew's own user, and no app token minted here names this repo in its
-`repositories` (the one that names no repo carries only organization custom
-properties read and metadata read). The app's private key itself could mint a wider token (the
-app is installed on every org repo and holds Administration write), which is
-why only `fetch`, `report` and `request` reference it, each installs nothing
-but the pinned `age`, and the ruleset's bypass list is Andrew's user alone, not
-the app: even a stolen key cannot push to this repo's main.
+Andrew's own user. That ruleset is repository-level (organization rulesets
+need GitHub Team; this org is on Free), and whoever holds Administration write
+on this repo can delete it, change the default branch or add a collaborator
+(GitHub's "Permissions required for GitHub Apps" lists the ruleset, repository
+and collaborator endpoints under Administration write). The app has
+Administration write, so **the app is not installed on this repo**, nor on
+`app-template` or `start`: its installation is "Only select repositories",
+the guest repos alone, each added when it is onboarded. A stolen
+`APP_PRIVATE_KEY` therefore reaches the guest repos and nothing here; it can
+neither touch this repo's ruleset nor push to its main. That is enforced, not
+assumed: the Mini's signing job reads the installation as the app before
+anything else and signs nothing while it is on all repositories or on a
+reserved one, `publish_pipeline.sh` refuses to push in that state, onboarding
+refuses to start in it, and no token the Mini mints may name a reserved repo
+(`guest-apps/common/github.py`). The poll job's listing token, which names no
+repo, carries only organization custom properties read and metadata read, and
+sees only what the installation reaches.
 
 **Actions.** GitHub-owned only (org policy), each pinned by full commit SHA.
 
