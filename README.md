@@ -77,8 +77,10 @@ A new guest's `/willoughby-apps:setup CODE` opens an issue here: title
 `GITHUB_TOKEN` (issues write here, nothing else):
 
 1. **blanks the issue first** (title `Enroll request`, body replaced), then
-   reads the title, body and author from `env:` only; nothing from the issue
-   is printed;
+   reads the title, body and author from the event file
+   (`$GITHUB_EVENT_PATH`), never from `env:`, since a step's env values are
+   printed in its public log header (the first live run, 2026-09-19, logged a
+   test code that way); nothing from the issue is printed;
 2. refuses more than 3 issues from one account in 24 hours (counted from this
    repo's own issues, so no state is kept);
 3. parses the request; the account enrolled is the issue's author
@@ -170,7 +172,7 @@ with any other digest.
 **No untrusted text in a script.** No `run:` contains `${{ }}`; inputs go
 through `env:` and `ci/ghapi.py validate_inputs` (repo name, 40-hex SHA,
 `push`/`tag`, `vN[.N[.N]]`). Branch names, commit messages and guest-repo issue text are
-never used at all; the enroll issue is read through `env:` only and never printed.
+never used at all; the enroll issue is read from the event file and never printed.
 
 **Only Andrew can push to main.** Every run executes `ci/*.py` from main with
 `PIPELINE_PRIVATE_KEY` and `MONOREPO_DISPATCH` in the environment, so a push to

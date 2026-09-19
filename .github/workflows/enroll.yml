@@ -3,9 +3,12 @@
 # (ci/enroll_format.py). The issue is blanked before anything else is read,
 # answered with one neutral comment, closed and locked, whatever the outcome.
 #
-# The issue text is untrusted: it reaches the script through env only, never a
-# `${{ }}` inside run:, and is never printed. The issue's author, set by
-# GitHub, is the account enrolled, never a name in the body.
+# The issue text is untrusted and holds the code. The script reads it from the
+# event file ($GITHUB_EVENT_PATH), never from env: a step's env values are
+# printed in its public log header (measured 2026-09-19: an ISSUE_BODY env put
+# the code in the log). It never reaches a `${{ }}` inside run: and is never
+# printed. The issue's author, set by GitHub, is the account enrolled, never a
+# name in the body.
 #
 # Tokens: this job's own GITHUB_TOKEN (issues write, this repo) for the issue,
 # and, only when the code matched, an app token for that one guest repo with
@@ -38,10 +41,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           INVITE_CODES: ${{ secrets.INVITE_CODES }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
         run: python3 ci/enroll.py redeem
 
       - if: steps.redeem.outputs.repo != ''

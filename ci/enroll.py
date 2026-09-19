@@ -13,8 +13,10 @@ log are public. Three steps, each its own command:
     finish   (GITHUB_TOKEN)  blank the issue again, one neutral comment,
              close, lock. Runs whatever happened before it.
 
-Untrusted text (title, body, author) arrives through env only and is never
-printed. INVITE_CODES is a repo secret, JSON {sha256(code): {"repo", "guest"}},
+Untrusted text (number, title, body, author) is read from the event file
+($GITHUB_EVENT_PATH) and never printed. Never from env: a step's env values
+are printed in its public log header, which put a code in the log on the
+first live run (2026-09-19). INVITE_CODES is a repo secret, JSON {sha256(code): {"repo", "guest"}},
 re-set as a whole by `python3 -m onboard` on the Mini; the code itself is
 never stored anywhere but Andrew's registry. A code is SPENT once its repo has
 any direct collaborator or pending invitation, so it needs no state of its own
@@ -129,6 +131,13 @@ def recent_requests(client, login: str, now: dt.datetime) -> int:
     return count
 
 
+def issue_fields(event_path: str) -> dict:
+    """The fields redeem needs, from the `issues` event payload GitHub writes to disk."""
+    issue = json.loads(Path(event_path).read_text()).get("issue") or {}
+    return {"ISSUE_NUMBER": str(issue.get("number", "")), "ISSUE_TITLE": issue.get("title") or "",
+            "ISSUE_BODY": issue.get("body") or "", "ISSUE_AUTHOR": (issue.get("user") or {}).get("login") or ""}
+
+
 def redeem(client, env: dict, now: dt.datetime) -> tuple[str, str | None]:
     """(result, repo or None). Blanks the issue before reading anything else."""
     redact(client, env.get("ISSUE_NUMBER", ""))
@@ -201,6 +210,7 @@ def main(argv=None) -> int:
     cmd = argv[0] if argv else ""
     env = dict(os.environ)
     if cmd == "redeem":
+        env.update(issue_fields(env.get("GITHUB_EVENT_PATH", "")))
         result, repo = redeem(Client.from_env("GITHUB_TOKEN"), env, dt.datetime.now(dt.timezone.utc))
         write_outputs(result, repo)
         print("request read", flush=True)
