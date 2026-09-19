@@ -30,7 +30,11 @@ C that last changed `testers.txt` as of H (`GET .../commits?sha=H&path=testers.t
 is looked up; when C carries no `willoughby/testers` status of ours,
 `guest-apple.yml` is dispatched on ajcohen9/willoughby with (repo, H, C) and C
 is marked `pending` there, which is what stops the next poll from dispatching
-it again. The Mini reads the file at H as data and syncs the app's external
+it again. A `pending` of ours older than TESTERS_STALE is dispatched again: the
+Mini's run replaces it with `success` or `error`, so one still pending that
+long was never run or never finished (a cancelled queue entry, a timeout
+before the report, a Mini that was off). A sync is idempotent, so a second
+one is harmless. The Mini reads the file at H as data and syncs the app's external
 TestFlight group to it. This needs MONOREPO_DISPATCH (Actions write on the
 monorepo); without it the testers step is skipped. It never counts towards
 the daily cap: nothing is built.
@@ -54,6 +58,10 @@ TESTERS_FILE = "testers.txt"
 MONOREPO = "ajcohen9/willoughby"
 APPLE_WORKFLOW = "guest-apple.yml"
 WAITING = "Waiting:"
+# guest-apple.yml's job has timeout-minutes 60 and queues (`queue: max`) behind
+# at most a build hand-off of the same repo, itself up to 60: three hours is
+# past anything that is still coming.
+TESTERS_STALE = dt.timedelta(hours=3)
 MAX_BRANCHES = 30
 MAX_TAGS = 30
 
@@ -116,9 +124,23 @@ def checks_today(pipeline: Client, repos: dict[str, str], today: dt.date) -> dic
     return counts
 
 
-def testers_change(org: Client, repo: str, login: str) -> tuple[str, str] | None:
+def stale_pending(status: dict, now: dt.datetime) -> bool:
+    """A `pending` of ours that no run has replaced within TESTERS_STALE."""
+    if status.get("state") != "pending":
+        return False
+    try:
+        at = dt.datetime.fromisoformat((status.get("updated_at") or status.get("created_at") or "").replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        return False
+    return now - at > TESTERS_STALE
+
+
+def testers_change(org: Client, repo: str, login: str, now: dt.datetime | None = None) -> tuple[str, str] | None:
     """(H, C) when the default branch head H passed its check and C, the commit
-    that last changed testers.txt as of H, has no testers status of ours yet."""
+    that last changed testers.txt as of H, has no testers status of ours yet, or
+    only a `pending` one gone stale."""
     default = (org.get(f"/repos/{ORG}/{repo}") or {}).get("default_branch") or ""
     if not default:
         return None
@@ -133,18 +155,20 @@ def testers_change(org: Client, repo: str, login: str) -> tuple[str, str] | None
     change = (changes[0] or {}).get("sha", "") if changes else ""
     if not SHA_RE.fullmatch(change):
         return None
-    if our_status(org.paginate(f"/repos/{ORG}/{repo}/commits/{change}/statuses", limit=100),
-                  TESTERS_CONTEXT, login):
+    ours = our_status(org.paginate(f"/repos/{ORG}/{repo}/commits/{change}/statuses", limit=100),
+                      TESTERS_CONTEXT, login)
+    if ours and not stale_pending(ours, now or dt.datetime.now(dt.timezone.utc)):
         return None
     return head, change
 
 
-def poll_testers(org: Client, mono: Client | None, repos: dict[str, str], dry_run: bool) -> list[tuple]:
+def poll_testers(org: Client, mono: Client | None, repos: dict[str, str], dry_run: bool,
+                 now: dt.datetime | None = None) -> list[tuple]:
     login = BOT_LOGIN
     actions = []
     for repo in sorted(repos):
         try:
-            found = testers_change(org, repo, login)
+            found = testers_change(org, repo, login, now)
         except GitHubError as e:
             # One repo's lookup failing (say, an empty repo) never stops the checks.
             print(f"testers: {repo} skipped (HTTP {e.status})")
@@ -169,7 +193,7 @@ def poll_testers(org: Client, mono: Client | None, repos: dict[str, str], dry_ru
 
 
 def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False,
-         mono: Client | None = None) -> list[tuple]:
+         mono: Client | None = None, now: dt.datetime | None = None) -> list[tuple]:
     login = BOT_LOGIN  # an installation token cannot call GET /user
     repos = guest_repos(org)
     counts = checks_today(pipeline, repos, today)
@@ -199,7 +223,7 @@ def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False,
                 "state": "pending", "context": context,
                 "description": "Queued: checking and building this commit.",
                 "target_url": f"https://github.com/{PIPELINE_REPO}/actions/workflows/check.yml"})
-    return actions + poll_testers(org, mono, repos, dry_run)
+    return actions + poll_testers(org, mono, repos, dry_run, now)
 
 
 def write_repos_output(names: list[str]) -> None:

@@ -159,6 +159,18 @@ def icon_links(repo: str, sha: str, path: str) -> tuple[str, str]:
             f"repos/{ORG}/{repo}/contents/{q}?ref={sha}")
 
 
+# The guest's app folder pre-allows exactly `gh api repos/willoughby-apps/* --method
+# GET --hostname github.com` (template .claude/settings.json): gh takes the last
+# --method and --hostname it is given, so that form can only read from GitHub.
+READ_SUFFIX = "--method GET --hostname github.com"
+
+
+def fetch_command(api_path: str, name: str) -> str:
+    """The command the guest's Claude runs to save a picture into the app's
+    build/ folder (kept out of commits by .git/info/exclude)."""
+    return f"gh api {api_path} -H 'Accept: application/vnd.github.raw' {READ_SUFFIX} > build/{name}"
+
+
 def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | None,
                  icon: tuple[str, str] | None = None) -> str:
     kind = env.get("KIND")
@@ -176,9 +188,9 @@ def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | Non
     elif image_url:
         parts += ["Screenshot from the iPhone simulator:", "", f"![screenshot]({image_url})", ""]
     if image_url:
-        parts += [f"Claude can fetch it with: `gh api {image_api} -H 'Accept: application/vnd.github.raw' > screenshot.png`", ""]
+        parts += [f"Claude can fetch it with: `{fetch_command(image_api, 'screenshot.png')}`", ""]
     if icon:
-        parts += [f"And the icon with: `gh api {icon[1]} -H 'Accept: application/vnd.github.raw' > icon.png`", ""]
+        parts += [f"And the icon with: `{fetch_command(icon[1], 'icon.png')}`", ""]
     parts += [f"Pipeline run: {env.get('RUN_URL')}"]
     return "\n".join(parts)[:MAX_COMMENT_CHARS]
 

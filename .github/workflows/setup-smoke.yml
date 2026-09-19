@@ -103,13 +103,28 @@ jobs:
           assert d[:8] == b"\x89PNG\r\n\x1a\n" and (w, h, ctype) == (1024, 1024, 2) and b"tRNS" not in d[:d.index(b"IDAT")]
           PY
 
-      - name: A described icon, drawn as SVG and rendered with qlmanage
+      # The command is read from the installed icon skill, so the smoke runs
+      # what the skill gives, not a copy of it.
+      - name: A described icon, drawn as SVG and rendered with qlmanage (the skill's own command)
         run: |
           set -euo pipefail
           work=$(mktemp -d)
+          skill="$HOME/.claude/plugins/marketplaces/willoughby-apps/plugins/willoughby-apps/skills/icon/SKILL.md"
+          # shellcheck disable=SC2016  # the backticks are the Markdown around the command
+          cmd=$(grep -o '`qlmanage -t [^`]*`' "$skill" | head -1 | tr -d '`')
+          test -n "$cmd"
+          cmd=${cmd//TMPDIR/$work}
+          echo "running: $cmd"
           printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><rect width="1024" height="1024" fill="#2a6f97"/><circle cx="512" cy="512" r="300" fill="#fff"/></svg>' > "$work/icon.svg"
-          qlmanage -t -s 1024 -o "$work" "$work/icon.svg"
+          eval "$cmd"
           sips -g pixelWidth -g pixelHeight "$work/icon.svg.png"
+          python3 - "$work/icon.svg.png" <<'PY'
+          import struct, sys
+          d = open(sys.argv[1], "rb").read()
+          w, h = struct.unpack(">II", d[16:24])
+          print("png", d[:8] == b"\x89PNG\r\n\x1a\n", w, h)
+          assert d[:8] == b"\x89PNG\r\n\x1a\n" and (w, h) == (1024, 1024), (w, h)
+          PY
 
   windows:
     runs-on: windows-2025
@@ -177,16 +192,29 @@ jobs:
           python -c "import struct,sys; d=open(sys.argv[1],'rb').read(); w,h,depth,ct=struct.unpack('>IIBB',d[16:26]); print('png',w,h,depth,ct); assert d[1:4]==b'PNG' and (w,h,ct)==(1024,1024,2) and b'tRNS' not in d[:d.index(b'IDAT')]" "$work\AppIcon.png"
           if ($LASTEXITCODE -ne 0) { throw "the icon is not a 1024x1024 RGB PNG" }
 
-      - name: A described icon, drawn as SVG and rendered with Edge (the icon skill's Windows route)
+      # The icon skill's own command, read from the installed skill and run
+      # in Windows PowerShell 5.1 (what a guest's Claude has) from a folder
+      # with a space in its name. PowerShell does not wait for a GUI program
+      # started with `&`; the skill's `Start-Process -Wait` must leave the
+      # picture there before the next line runs.
+      - name: A described icon, drawn as SVG and rendered with Edge (the icon skill's own command)
+        shell: powershell
+        timeout-minutes: 5
         run: |
-          $work = Join-Path $env:RUNNER_TEMP svg
+          $skill = "$env:USERPROFILE\.claude\plugins\marketplaces\willoughby-apps\plugins\willoughby-apps\skills\icon\SKILL.md"
+          $m = Select-String -LiteralPath $skill -Pattern '`(Start-Process -Wait -FilePath [^`]*msedge\.exe[^`]*)`'
+          if (-not $m) { throw "no Edge command in the icon skill" }
+          $line = $m[0].Matches[0].Groups[1].Value
+          $work = Join-Path $env:RUNNER_TEMP 'svg dir'
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           Set-Content -LiteralPath "$work\icon.svg" -Encoding ascii -Value '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024"><rect width="1024" height="1024" fill="#2a6f97"/><circle cx="512" cy="512" r="300" fill="#fff"/></svg>'
-          $edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
-          $url = "file:///" + ("$work\icon.svg" -replace '\\', '/')
-          $p = Start-Process -FilePath $edge -ArgumentList @('--headless', '--disable-gpu', '--hide-scrollbars', '--window-size=1024,1024', "--screenshot=$work\icon-svg.png", $url) -Wait -PassThru
-          "edge exit code: $($p.ExitCode)"
-          if (-not (Test-Path -LiteralPath "$work\icon-svg.png")) { throw "Edge wrote no screenshot" }
+          $url = ($work -replace '\\', '/') -replace ' ', '%20'
+          $cmd = $line.Replace('TMPURL', $url).Replace('TMPDIR', $work)
+          "running: $cmd"
+          Invoke-Expression $cmd
+          if (-not (Test-Path -LiteralPath "$work\icon-svg.png")) { throw "Edge wrote no screenshot by the time the skill's command returned" }
+          python -c "import struct,sys; d=open(sys.argv[1],'rb').read(); w,h=struct.unpack('>II',d[16:24]); print('png',w,h); assert d[1:4]==b'PNG' and (w,h)==(1024,1024)" "$work\icon-svg.png"
+          if ($LASTEXITCODE -ne 0) { throw "Edge's picture is not 1024x1024" }
           $script = "$env:USERPROFILE\.claude\plugins\marketplaces\willoughby-apps\plugins\willoughby-apps\scripts\icon.ps1"
           powershell -NoProfile -ExecutionPolicy Bypass -File $script -In "$work\icon-svg.png" -Out "$work\AppIcon.png"
           if ($LASTEXITCODE -ne 0) { throw "icon.ps1 exited $LASTEXITCODE" }
