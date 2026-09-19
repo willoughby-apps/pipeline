@@ -1,6 +1,7 @@
 # Every 5 minutes: start check.yml for each new branch head and v* tag in the
-# guest repos (ci/poll.py), with two app tokens: one that can only list the
-# guest repos, then one limited to exactly those repos. A workflow_dispatch sent with GITHUB_TOKEN does
+# guest repos, and guest-apple.yml on the monorepo for a testers.txt changed
+# at a checked head (ci/poll.py), with two app tokens: one that can only list
+# the guest repos, then one limited to exactly those repos. A workflow_dispatch sent with GITHUB_TOKEN does
 # create a run (GitHub docs, "Triggering a workflow": "workflow_dispatch and
 # repository_dispatch events always create workflow runs").
 #
@@ -68,10 +69,13 @@ jobs:
           permission-statuses: write
           permission-organization-custom-properties: read
 
-      - name: Find new commits and start their checks
+      # MONOREPO_DISPATCH starts guest-apple.yml on the Mini when a checked
+      # head changed testers.txt. This job runs no guest code and installs nothing.
+      - name: Find new commits and start their checks; hand changed tester lists to the Mini
         if: steps.list.outputs.repos != ''
         env:
           APP_TOKEN: ${{ steps.app.outputs.token }}
           GITHUB_TOKEN: ${{ github.token }}
+          MONOREPO_DISPATCH: ${{ secrets.MONOREPO_DISPATCH }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: python3 ci/poll.py ${DRY_RUN:+--dry-run}

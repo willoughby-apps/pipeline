@@ -14,9 +14,16 @@ Everything in there is guest-derived (the preview ran the guest's app), so it
 is parsed as data and only ever written to the guest's own private repo: a
 commit status, a commit comment, and the screenshot committed under the
 non-branch ref `refs/willoughby/previews` (no branch, so the guest's clone and
-the poll never see it). Nothing guest-written reaches this public log.
+the poll never see it), beside a copy of the app icon the gate passed (the same
+git blob, no bytes re-uploaded). Nothing guest-written reaches this public log.
 
-Writes `ok=true|false` to $GITHUB_OUTPUT.
+Writes to $GITHUB_OUTPUT: `ok=true|false`, and for the request job
+`previews_commit` (the previews-ref commit holding this check's images),
+`preview_screenshot` and `preview_icon` (their paths there, each empty when
+not stored). Those paths are ours (`previews/<sha>-<kind>.png`,
+`previews/<sha>-<kind>-icon.png`), never the guest's file names, so they can
+travel through a job output and a step's env without putting anything
+guest-written in the public log.
 """
 from __future__ import annotations
 
@@ -186,11 +193,52 @@ def screenshot_bytes(reports: Path) -> bytes | None:
     return data
 
 
+def preview_paths(sha: str, kind: str) -> dict:
+    """Where this check's images live under PREVIEW_REF (ours, never guest-named)."""
+    return {"screenshot": f"previews/{sha}-{kind}.png", "icon": f"previews/{sha}-{kind}-icon.png"}
+
+
+BLOB_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def icon_blob(client: Client, repo: str, sha: str, path: str) -> str | None:
+    """The git blob SHA of the icon the gate passed, at `sha` (a file, not a link)."""
+    from urllib.parse import quote
+    q = "/".join(quote(p) for p in path.split("/"))
+    try:
+        doc = client.get(f"/repos/{ORG}/{repo}/contents/{q}?ref={sha}")
+    except GitHubError:
+        return None
+    if not isinstance(doc, dict) or doc.get("type") != "file":
+        return None
+    blob = doc.get("sha") or ""
+    return blob if BLOB_SHA_RE.fullmatch(blob) else None
+
+
 def store_screenshot(client: Client, repo: str, sha: str, kind: str, png: bytes) -> tuple[str, str]:
     """Commit the PNG under PREVIEW_REF; returns that commit's SHA and the file path."""
-    path = f"previews/{sha}-{kind}.png"
-    blob = client.post(f"/repos/{ORG}/{repo}/git/blobs",
-                       {"content": base64.b64encode(png).decode(), "encoding": "base64"})["sha"]
+    commit, paths = store_previews(client, repo, sha, kind, png, None)
+    return commit, paths["screenshot"]
+
+
+def store_previews(client: Client, repo: str, sha: str, kind: str, png: bytes | None,
+                   icon: str | None) -> tuple[str, dict]:
+    """Commit the screenshot PNG and the icon (an existing blob of the repo) under
+    PREVIEW_REF in one commit; returns that commit's SHA and {name: path} of
+    what it holds."""
+    names = preview_paths(sha, kind)
+    entries, stored = [], {}
+    if png:
+        blob = client.post(f"/repos/{ORG}/{repo}/git/blobs",
+                           {"content": base64.b64encode(png).decode(), "encoding": "base64"})["sha"]
+        entries.append({"path": names["screenshot"], "mode": "100644", "type": "blob", "sha": blob})
+        stored["screenshot"] = names["screenshot"]
+    if icon:
+        entries.append({"path": names["icon"], "mode": "100644", "type": "blob", "sha": icon})
+        stored["icon"] = names["icon"]
+    if not entries:
+        raise RuntimeError("nothing to store")
+    what = " and ".join(k for k in ("screenshot", "icon") if k in stored)
     for _ in range(3):
         try:
             parent = client.get(f"/repos/{ORG}/{repo}/git/ref/{PREVIEW_REF[5:]}")["object"]["sha"]
@@ -198,12 +246,12 @@ def store_screenshot(client: Client, repo: str, sha: str, kind: str, png: bytes)
             if e.status != 404:
                 raise
             parent = None
-        body = {"tree": [{"path": path, "mode": "100644", "type": "blob", "sha": blob}]}
+        body = {"tree": entries}
         if parent:
             body["base_tree"] = client.get(f"/repos/{ORG}/{repo}/git/commits/{parent}")["tree"]["sha"]
         tree = client.post(f"/repos/{ORG}/{repo}/git/trees", body)["sha"]
         commit = client.post(f"/repos/{ORG}/{repo}/git/commits", {
-            "message": f"Simulator screenshot for {sha[:7]} ({kind})", "tree": tree,
+            "message": f"Simulator {what} for {sha[:7]} ({kind})", "tree": tree,
             "parents": [parent] if parent else []})["sha"]
         try:
             if parent:
@@ -211,7 +259,7 @@ def store_screenshot(client: Client, repo: str, sha: str, kind: str, png: bytes)
                             {"sha": commit, "force": False})
             else:
                 client.post(f"/repos/{ORG}/{repo}/git/refs", {"ref": PREVIEW_REF, "sha": commit})
-            return commit, path
+            return commit, stored
         except GitHubError as e:
             if e.status not in (409, 422):  # someone else moved the ref: retry on top of theirs
                 raise
@@ -231,17 +279,20 @@ def main(argv=None) -> int:
     v = verdict(env, reports)
     image_url = image_api = None
     png = screenshot_bytes(reports)
-    if png:
+    path = icon_path(reports)
+    blob = icon_blob(client, repo, sha, path) if path else None
+    previews_commit, stored = "", {}
+    if png or blob:
         try:
-            commit, path = store_screenshot(client, repo, sha, kind, png)
-            image_url = f"https://github.com/{ORG}/{repo}/blob/{commit}/{path}?raw=true"
-            image_api = f"repos/{ORG}/{repo}/contents/{path}?ref={commit}"
+            previews_commit, stored = store_previews(client, repo, sha, kind, png, blob)
         except (GitHubError, RuntimeError) as e:
-            print(f"warning: screenshot not stored ({type(e).__name__})")
+            print(f"warning: previews not stored ({type(e).__name__})")
+    if "screenshot" in stored:
+        image_url = f"https://github.com/{ORG}/{repo}/blob/{previews_commit}/{stored['screenshot']}?raw=true"
+        image_api = f"repos/{ORG}/{repo}/contents/{stored['screenshot']}?ref={previews_commit}"
     client.post(f"/repos/{ORG}/{repo}/statuses/{sha}", {
         "state": v["state"], "context": CONTEXTS[kind], "description": v["description"][:140],
         "target_url": env.get("RUN_URL")})
-    path = icon_path(reports)
     icon = icon_links(repo, sha, path) if path else None
     client.post(f"/repos/{ORG}/{repo}/commits/{sha}/comments",
                 {"body": comment_body(v, env, image_url, image_api, icon)})
@@ -250,6 +301,9 @@ def main(argv=None) -> int:
     if out:
         with open(out, "a") as fh:
             fh.write(f"ok={'true' if ok else 'false'}\n")
+            fh.write(f"previews_commit={previews_commit}\n")
+            fh.write(f"preview_screenshot={stored.get('screenshot', '')}\n")
+            fh.write(f"preview_icon={stored.get('icon', '')}\n")
     print(f"reported {v['state']} on the commit")
     return 0
 

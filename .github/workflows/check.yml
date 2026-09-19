@@ -378,6 +378,10 @@ jobs:
       actions: write
     outputs:
       ok: ${{ steps.report.outputs.ok }}
+      # Ours, never guest-written: a commit SHA and previews/<sha>-tag[-icon].png.
+      previews_commit: ${{ steps.report.outputs.previews_commit }}
+      preview_screenshot: ${{ steps.report.outputs.preview_screenshot }}
+      preview_icon: ${{ steps.report.outputs.preview_icon }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -454,7 +458,8 @@ jobs:
               gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
             done
 
-  # Tags only: open the release request and start the advisory review.
+  # Tags only: open the release request (mentioning Andrew, with the previews)
+  # and start the advisory review.
   request:
     needs: [fetch, build, report]
     if: inputs.kind == 'tag' && needs.report.outputs.ok == 'true'
@@ -489,4 +494,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           IPA_SHA256: ${{ needs.build.outputs.ipa_sha256 }}
           SOURCE_SHA256: ${{ needs.fetch.outputs.source_sha256 }}
+          PREVIEWS_COMMIT: ${{ needs.report.outputs.previews_commit }}
+          PREVIEW_SCREENSHOT: ${{ needs.report.outputs.preview_screenshot }}
+          PREVIEW_ICON: ${{ needs.report.outputs.preview_icon }}
         run: python3 ci/request.py

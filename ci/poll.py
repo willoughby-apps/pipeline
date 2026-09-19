@@ -23,6 +23,17 @@ write statuses on their repo, but not as the bot.
 Per guest, at most DAILY_CAP checks start per UTC day, counted from check.yml's
 own runs (their run-name carries the repo). Past the cap the commit gets a
 `pending` "Waiting" status and is picked up the next day.
+
+**Testers (PLAN section 8).** For each guest repo whose default-branch head H
+passed its check (the bot's `willoughby/check` status is success), the commit
+C that last changed `testers.txt` as of H (`GET .../commits?sha=H&path=testers.txt`)
+is looked up; when C carries no `willoughby/testers` status of ours,
+`guest-apple.yml` is dispatched on ajcohen9/willoughby with (repo, H, C) and C
+is marked `pending` there, which is what stops the next poll from dispatching
+it again. The Mini reads the file at H as data and syncs the app's external
+TestFlight group to it. This needs MONOREPO_DISPATCH (Actions write on the
+monorepo); without it the testers step is skipped. It never counts towards
+the daily cap: nothing is built.
 """
 from __future__ import annotations
 
@@ -33,10 +44,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ghapi import APP_TOKEN_ENV, BOT_LOGIN, ORG, PIPELINE_REPO, REPO_NAME_RE, RESERVED_REPOS, SHA_RE, TAG_RE, Client  # noqa: E402
+from ghapi import (APP_TOKEN_ENV, BOT_LOGIN, ORG, PIPELINE_REPO, REPO_NAME_RE, RESERVED_REPOS, SHA_RE, TAG_RE,  # noqa: E402
+                   Client, GitHubError)
 
 DAILY_CAP = 20
 CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release"}
+TESTERS_CONTEXT = "willoughby/testers"
+TESTERS_FILE = "testers.txt"
+MONOREPO = "ajcohen9/willoughby"
+APPLE_WORKFLOW = "guest-apple.yml"
 WAITING = "Waiting:"
 MAX_BRANCHES = 30
 MAX_TAGS = 30
@@ -100,7 +116,60 @@ def checks_today(pipeline: Client, repos: dict[str, str], today: dt.date) -> dic
     return counts
 
 
-def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -> list[tuple]:
+def testers_change(org: Client, repo: str, login: str) -> tuple[str, str] | None:
+    """(H, C) when the default branch head H passed its check and C, the commit
+    that last changed testers.txt as of H, has no testers status of ours yet."""
+    default = (org.get(f"/repos/{ORG}/{repo}") or {}).get("default_branch") or ""
+    if not default:
+        return None
+    head = ((org.get(f"/repos/{ORG}/{repo}/branches/{default}") or {}).get("commit") or {}).get("sha") or ""
+    if not SHA_RE.fullmatch(head):
+        return None
+    checked = our_status(org.paginate(f"/repos/{ORG}/{repo}/commits/{head}/statuses", limit=100),
+                         CONTEXTS["push"], login)
+    if not checked or checked.get("state") != "success":
+        return None
+    changes = org.get(f"/repos/{ORG}/{repo}/commits?sha={head}&path={TESTERS_FILE}&per_page=1") or []
+    change = (changes[0] or {}).get("sha", "") if changes else ""
+    if not SHA_RE.fullmatch(change):
+        return None
+    if our_status(org.paginate(f"/repos/{ORG}/{repo}/commits/{change}/statuses", limit=100),
+                  TESTERS_CONTEXT, login):
+        return None
+    return head, change
+
+
+def poll_testers(org: Client, mono: Client | None, repos: dict[str, str], dry_run: bool) -> list[tuple]:
+    login = BOT_LOGIN
+    actions = []
+    for repo in sorted(repos):
+        try:
+            found = testers_change(org, repo, login)
+        except GitHubError as e:
+            # One repo's lookup failing (say, an empty repo) never stops the checks.
+            print(f"testers: {repo} skipped (HTTP {e.status})")
+            continue
+        if not found:
+            continue
+        head, change = found
+        actions.append(("testers", repo, head, "testers", change))
+        if dry_run or mono is None:
+            continue
+        try:
+            mono.post(f"/repos/{MONOREPO}/actions/workflows/{APPLE_WORKFLOW}/dispatches", {
+                "ref": "main", "inputs": {"repo": repo, "sha": head, "change": change}})
+        except GitHubError as e:
+            # Not marked pending, so the next poll tries again.
+            print(f"testers: could not start {APPLE_WORKFLOW} for {repo} (HTTP {e.status})")
+            continue
+        org.post(f"/repos/{ORG}/{repo}/statuses/{change}", {
+            "state": "pending", "context": TESTERS_CONTEXT,
+            "description": "Queued: updating the TestFlight testers from testers.txt."})
+    return actions
+
+
+def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False,
+         mono: Client | None = None) -> list[tuple]:
     login = BOT_LOGIN  # an installation token cannot call GET /user
     repos = guest_repos(org)
     counts = checks_today(pipeline, repos, today)
@@ -130,7 +199,7 @@ def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -
                 "state": "pending", "context": context,
                 "description": "Queued: checking and building this commit.",
                 "target_url": f"https://github.com/{PIPELINE_REPO}/actions/workflows/check.yml"})
-    return actions
+    return actions + poll_testers(org, mono, repos, dry_run)
 
 
 def write_repos_output(names: list[str]) -> None:
@@ -157,11 +226,17 @@ def main(argv=None) -> int:
         print(f"{len(names)} guest repo(s)")
         return 0
     pipeline = Client.from_env("GITHUB_TOKEN")
-    actions = poll(org, pipeline, dt.datetime.now(dt.timezone.utc).date(), args.dry_run)
+    mono = Client(os.environ["MONOREPO_DISPATCH"]) if os.environ.get("MONOREPO_DISPATCH") else None
+    actions = poll(org, pipeline, dt.datetime.now(dt.timezone.utc).date(), args.dry_run, mono)
     started = sum(1 for a in actions if a[0] == "check")
     waiting = sum(1 for a in actions if a[0] == "wait")
+    testers = sum(1 for a in actions if a[0] == "testers")
     # Counts only: repo names and SHAs are not secret, but nothing guest-written is printed.
     print(f"{'would start' if args.dry_run else 'started'} {started} check(s); {waiting} waiting on the daily cap")
+    if testers and mono is None and not args.dry_run:
+        print(f"{testers} tester list(s) changed, not synced: MONOREPO_DISPATCH is not set")
+    else:
+        print(f"{'would sync' if args.dry_run else 'syncing'} {testers} tester list(s)")
     return 0
 
 
