@@ -32,10 +32,10 @@ on:
         required: true
         type: string
       kind:
-        description: push (report only) or tag (report + release request)
+        description: push (report only), tag (report + release request) or testers (gate + testers request, no build)
         required: true
         type: choice
-        options: [push, tag]
+        options: [push, tag, testers]
       tag:
         description: the v* tag, for kind=tag
         required: false
@@ -79,6 +79,9 @@ jobs:
       contents: read
     outputs:
       bundle_id: ${{ steps.fetch.outputs.bundle_id }}
+      # The last commit Andrew approved (the repo's org-owned approved_sha
+      # property), when this commit is not it: the change summary's base.
+      base_sha: ${{ steps.fetch.outputs.base_sha }}
       source_key: ${{ steps.handoff.outputs.source_key }}
       source_sha256: ${{ steps.handoff.outputs.source_sha256 }}
     steps:
@@ -105,11 +108,13 @@ jobs:
           ci/install_tools.sh "$RUNNER_TEMP/bin" age
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
-      - name: Fetch the guest repo as data
+      - name: Fetch the guest repo as data (and the approved commit, to compare)
         id: fetch
         env:
           APP_TOKEN: ${{ steps.app.outputs.token }}
-        run: python3 ci/fetch_source.py "$RUNNER_TEMP/handoff/source.tar.gz" "$RUNNER_TEMP/handoff/tree.json"
+        run: |
+          python3 ci/fetch_source.py "$RUNNER_TEMP/handoff/source.tar.gz" "$RUNNER_TEMP/handoff/tree.json" \
+            "$RUNNER_TEMP/handoff/base.tar.gz" "$RUNNER_TEMP/handoff/base-tree.json"
 
       # The source goes to `gate` and `build` encrypted to a key made for this
       # run only; the key travels as a job output (README.md, "Source hand-off").
@@ -118,7 +123,10 @@ jobs:
         run: |
           umask 077
           age-keygen -o "$RUNNER_TEMP/handoff.key" 2> /dev/null
-          tar -C "$RUNNER_TEMP/handoff" -cf - source.tar.gz tree.json \
+          files="source.tar.gz tree.json"
+          if [ -f "$RUNNER_TEMP/handoff/base.tar.gz" ]; then files="$files base.tar.gz base-tree.json"; fi
+          # shellcheck disable=SC2086
+          tar -C "$RUNNER_TEMP/handoff" -cf - $files \
             | age -r "$(age-keygen -y "$RUNNER_TEMP/handoff.key")" -o "$RUNNER_TEMP/source.age"
           {
             echo "source_key=$(grep '^AGE-SECRET-KEY-' "$RUNNER_TEMP/handoff.key")"
@@ -175,7 +183,7 @@ jobs:
           umask 077
           printf '%s\n' "$SOURCE_KEY" > "$RUNNER_TEMP/handoff.key"
           mkdir -p "$RUNNER_TEMP/handoff"
-          age -d -i "$RUNNER_TEMP/handoff.key" "$RUNNER_TEMP/in/source.age" | tar -C "$RUNNER_TEMP/handoff" -xf - source.tar.gz tree.json
+          age -d -i "$RUNNER_TEMP/handoff.key" "$RUNNER_TEMP/in/source.age" | tar -C "$RUNNER_TEMP/handoff" -xf -
           rm -f "$RUNNER_TEMP/handoff.key"
           echo "$SOURCE_SHA256  $RUNNER_TEMP/handoff/source.tar.gz" | shasum -a 256 --check --status
 
@@ -197,6 +205,26 @@ jobs:
           echo "passed=$passed" >> "$GITHUB_OUTPUT"
           echo "gate passed: $passed"
 
+      # What this commit changes since the last commit Andrew approved, read
+      # as data the gate's way (gate/changes.py), for the request issue's
+      # willoughby-changes block. Into the encrypted gate report, never the log.
+      - name: Summarize the changes since the approved commit
+        if: steps.gate.outputs.passed == 'true'
+        run: |
+          out="$RUNNER_TEMP/out/gate"
+          base_arg=""
+          if [ -f "$RUNNER_TEMP/handoff/base.tar.gz" ]; then
+            if python3 ci/unpack.py "$RUNNER_TEMP/handoff/base.tar.gz" "$RUNNER_TEMP/base" --tree "$RUNNER_TEMP/handoff/base-tree.json" > /dev/null 2>&1; then
+              base_arg="--base $RUNNER_TEMP/base"
+            fi
+          fi
+          # shellcheck disable=SC2086
+          if python3 -m gate changes "$RUNNER_TEMP/repo" $base_arg --json "$out/changes.json" > /dev/null 2>&1; then
+            echo "change summary written"
+          else
+            echo "the change summary could not be computed"
+          fi
+
       - name: Encrypt the gate report
         if: always()
         run: |
@@ -214,7 +242,7 @@ jobs:
   # Compiles the gated source, unsigned. No secret, no token permissions.
   build:
     needs: [fetch, gate]
-    if: needs.gate.outputs.passed == 'true'
+    if: needs.gate.outputs.passed == 'true' && inputs.kind != 'testers'
     runs-on: macos-26
     timeout-minutes: 60
     permissions: {}
@@ -458,11 +486,12 @@ jobs:
               gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
             done
 
-  # Tags only: open the release request (mentioning Andrew, with the previews)
-  # and start the advisory review.
+  # Tags and testers: open the request for Andrew (mentioning him, with the
+  # previews and the willoughby-changes block of what changed since the
+  # approved commit) and, for a tag, start the advisory review.
   request:
     needs: [fetch, build, report]
-    if: inputs.kind == 'tag' && needs.report.outputs.ok == 'true'
+    if: ${{ !cancelled() && needs.report.outputs.ok == 'true' && (inputs.kind == 'tag' || inputs.kind == 'testers') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -471,6 +500,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install age (pinned)
+        run: |
+          ci/install_tools.sh "$RUNNER_TEMP/bin" age
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        continue-on-error: true
+        with:
+          name: gate-report
+          path: ${{ runner.temp }}/enc
+
+      # The change summary is guest-derived: decrypted here, parsed as data by
+      # request.py, written only into the guest's own private repo.
+      - name: Decrypt the gate report (for the change summary)
+        env:
+          PIPELINE_PRIVATE_KEY: ${{ secrets.PIPELINE_PRIVATE_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/pipeline.key"
+          printf '%s\n' "$PIPELINE_PRIVATE_KEY" > "$key"
+          mkdir -p "$RUNNER_TEMP/reports"
+          f="$RUNNER_TEMP/enc/gate-report.age"
+          if [ -f "$f" ] && age -d -i "$key" -o "$RUNNER_TEMP/gate.tar.gz" "$f"; then
+            python3 ci/unpack.py "$RUNNER_TEMP/gate.tar.gz" "$RUNNER_TEMP/reports/gate" > /dev/null 2>&1 \
+              || echo "the gate report could not be unpacked"
+          else
+            echo "no gate report to read"
+          fi
+          rm -f "$key"
 
       - name: Validate inputs (before any token exists)
         run: python3 -c 'import os, sys; sys.path.insert(0, "ci"); import ghapi; ghapi.validate_inputs(os.environ["REPO"], os.environ["SHA"], os.environ["KIND"], os.environ["TAG"])'
@@ -486,7 +545,7 @@ jobs:
           permission-issues: write
           permission-metadata: read
 
-      - name: Open the release request and dispatch the review
+      - name: Open the request and, for a tag, dispatch the review
         env:
           APP_TOKEN: ${{ steps.app.outputs.token }}
           MONOREPO_DISPATCH: ${{ secrets.MONOREPO_DISPATCH }}
@@ -497,4 +556,7 @@ jobs:
           PREVIEWS_COMMIT: ${{ needs.report.outputs.previews_commit }}
           PREVIEW_SCREENSHOT: ${{ needs.report.outputs.preview_screenshot }}
           PREVIEW_ICON: ${{ needs.report.outputs.preview_icon }}
+          BASE_SHA: ${{ needs.fetch.outputs.base_sha }}
+          BUNDLE_ID: ${{ needs.fetch.outputs.bundle_id }}
+          CHANGES_JSON: ${{ runner.temp }}/reports/gate/changes.json
         run: python3 ci/request.py

@@ -37,7 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ghapi import APP_TOKEN_ENV, ORG, Client, GitHubError, validate_inputs  # noqa: E402
 
-CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release"}
+CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release", "testers": "willoughby/testers-request"}
 PREVIEW_REF = "refs/willoughby/previews"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MAX_PNG_BYTES = 10 * 1024 * 1024
@@ -108,6 +108,13 @@ def verdict(env: dict, reports: Path) -> dict:
         return {"state": "error", "description": "The safety checks could not run (a pipeline problem).",
                 "headline": "The safety checks could not run. This is a problem with the pipeline, not with your code: push again later, or ask Andrew with /willoughby-apps:help if it keeps happening.",
                 "sections": sections}
+    if env.get("KIND") == "testers":
+        # Nothing is built for a tester-list change: the gate passed, and the
+        # request job opens the testers request for Andrew.
+        return {"state": "success", "description": "Only the tester list changed. Waiting for Andrew's approval.",
+                "headline": "Only the tester list changed since Andrew's last approval, so nothing was built. "
+                            "Andrew has been asked to approve the new list; it takes effect when he does.",
+                "sections": sections}
     if env.get("BUILT") != "true":
         if build is not None:
             errs = build.get("errors") or []
@@ -174,7 +181,7 @@ def fetch_command(api_path: str, name: str) -> str:
 def comment_body(v: dict, env: dict, image_url: str | None, image_api: str | None,
                  icon: tuple[str, str] | None = None) -> str:
     kind = env.get("KIND")
-    title = f"Release check for {env.get('TAG')}" if kind == "tag" else "Check"
+    title = {"tag": f"Release check for {env.get('TAG')}", "testers": "Tester list check"}.get(kind, "Check")
     parts = [f"**{title}: {v['headline']}**", ""]
     for heading, body in v["sections"]:
         parts += [f"{heading}:", "```text", body, "```", ""]
@@ -294,7 +301,7 @@ def main(argv=None) -> int:
     path = icon_path(reports)
     blob = icon_blob(client, repo, sha, path) if path else None
     previews_commit, stored = "", {}
-    if png or blob:
+    if (png or blob) and kind != "testers":
         try:
             previews_commit, stored = store_previews(client, repo, sha, kind, png, blob)
         except (GitHubError, RuntimeError) as e:

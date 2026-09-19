@@ -32,7 +32,10 @@ BOT_LOGIN = "willoughby-apps-bot[bot]"
 REPO_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 TAG_RE = re.compile(r"v[0-9]{1,4}(\.[0-9]{1,4}){0,2}")
-KINDS = ("push", "tag")
+# push: a branch head (report only); tag: a release (report + release request);
+# testers: a default-branch head whose only change since the approved commit
+# is testers.txt (gate + change summary + testers request, nothing built).
+KINDS = ("push", "tag", "testers")
 # Org repos that are never a guest repo, and so never in a guest token's scope.
 RESERVED_REPOS = ("pipeline", "app-template", "start")
 
@@ -75,8 +78,8 @@ def validate_inputs(repo: str, sha: str, kind: str, tag: str) -> None:
         raise ValueError(f"kind must be one of {KINDS}")
     if kind == "tag" and not TAG_RE.fullmatch(tag or ""):
         raise ValueError("a tag check needs a tag like v1.2")
-    if kind == "push" and tag:
-        raise ValueError("a push check takes no tag")
+    if kind in ("push", "testers") and tag:
+        raise ValueError(f"a {kind} check takes no tag")
 
 
 class Client:

@@ -13,8 +13,8 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 
 | Workflow | When | What |
 |---|---|---|
-| `poll.yml` | every 5 minutes, or by hand (`dry_run`) | For each guest repo (an org repo with a `bundle_id` custom property), each branch head and `v*` tag without a status from us starts `check.yml` and is marked `pending`. At most 20 checks per guest per UTC day. When the default branch head passed its check and the commit that last changed `testers.txt` has no `willoughby/testers` status from us, it dispatches `guest-apple.yml` on the monorepo (the Mini syncs the app's external TestFlight group to the file) and marks that commit `pending`. |
-| `check.yml` | dispatched by `poll.yml`, or by hand, or `workflow_call` | `fetch` → `gate` → `build` → `preview` → `report` → `request` (tags only). |
+| `poll.yml` | every 5 minutes (a `workflow_dispatch` from a launchd agent on Andrew's Mini; the cron `3-58/5` is only a backup, since GitHub delays and drops scheduled runs under load), or by hand (`dry_run`) | For each guest repo (an org repo with a `bundle_id` custom property), each branch head and `v*` tag without a status from us starts `check.yml` and is marked `pending`. At most 20 checks per guest per UTC day. When the default-branch head is ahead of the repo's `approved_sha` (the last commit Andrew approved, set by his reconciler) and only `testers.txt` (plus his managed files) changed, it starts `check.yml` with kind `testers` (a testers request, nothing built). Poll never hands a pushed tester list to the Mini: only an approved commit's list takes effect. |
+| `check.yml` | dispatched by `poll.yml`, or by hand, or `workflow_call` | `fetch` (the commit, and the approved commit to compare) → `gate` (+ the change summary, `gate changes`) → `build` → `preview` → `report` → `request` (tags: release request + review; `testers`: testers request, no build or preview). |
 | `enroll.yml` | an issue is opened here | Redeems an invite code (`ci/enroll.py`): below. |
 | `setup-smoke.yml` | by hand | Runs the setup skill's non-interactive install commands (Claude Code, git, gh) on clean GitHub-hosted Mac (`macos-26`) and Windows (`windows-2025`) machines and installs the plugin from `willoughby-apps/start` with `claude plugin marketplace add` and `claude plugin install`. No secret, no token, no action. |
 
@@ -25,15 +25,19 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
    guest wrote. Resolves the bundle ID from the repo's `bundle_id` custom
    property (only an org owner can set it), checks the commit is in that repo
    (and, for a tag, that the tag still points at it), downloads GitHub's
-   tarball of that SHA and the commit's tree listing, encrypts both to a
-   one-run key and exits.
+   tarball of that SHA and the commit's tree listing, and the same for the
+   repo's `approved_sha` (the last commit Andrew approved, an org-owned
+   property his reconciler sets), encrypts them to a one-run key and exits.
 2. **gate** (Ubuntu). No secret. Installs the four scanners at pinned versions
    (semgrep and its whole dependency tree from the hash-locked
    `ci/requirements-gate.txt`, `--require-hashes --only-binary=:all:`), decrypts
    the source, checks its SHA-256, unpacks it as data (`ci/unpack.py --tree`:
    the archive must be exactly the commit's tree) and runs `python3 -m gate`.
-   No git runs on guest content and no guest code runs.
-3. **build** (macOS 26, Xcode 26.6). `permissions: {}`, no secret. `xcodegen`,
+   When it passes, `python3 -m gate changes` reads the approved tree and this
+   one the same way and writes what changed (testers, name, version,
+   permissions, hosts, entitlements, managed files) into the encrypted gate
+   report. No git runs on guest content and no guest code runs.
+3. **build** (macOS 26, Xcode 26.6; not for `testers`). `permissions: {}`, no secret. `xcodegen`,
    then `xcodebuild archive` for a device and `xcodebuild build` for the
    simulator, both `CODE_SIGNING_ALLOWED=NO`. Output goes to `build.log`, never
    the job log. It records the SHA-256 of `unsigned.ipa` as a job output.
@@ -42,16 +46,21 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
    runs.
 5. **report** (Ubuntu). Decrypts the reports with `PIPELINE_PRIVATE_KEY` and
    posts, on the guest commit: a status (`willoughby/check` for a push,
-   `willoughby/release` for a tag), a comment with the gate failures or compile
+   `willoughby/release` for a tag, `willoughby/testers-request` for a tester
+   list), a comment with the gate failures or compile
    errors, and the screenshot, which it commits under the non-branch ref
    `refs/willoughby/previews` in the guest repo, with a copy of the app icon
    the gate passed (the same git blob) beside it. Deletes the one-run hand-off
    artifacts.
-6. **request** (Ubuntu, tags that passed). Opens `Release request: vX` in the
-   guest repo, which @mentions Andrew (so GitHub notifies him) and shows the
+6. **request** (Ubuntu, tags and tester lists that passed). Opens `Release
+   request: vX` (or `Testers request: <sha>`) in the guest repo, creating its
+   label if missing, which @mentions Andrew (so GitHub notifies him) and shows the
    icon and screenshot from the previews ref, with a machine-readable
    `<!-- willoughby-previews v1 {json} -->` block of their URLs (our commit and
-   our paths only, passed from `report` as job outputs), and dispatches
+   our paths only, passed from `report` as job outputs) and a
+   `<!-- willoughby-changes v1 {json} -->` block of what changed since the
+   approved commit (decrypted from the gate report with `PIPELINE_PRIVATE_KEY`;
+   format in `ci/request.py CHANGES_BLOCK_DOC`), and, for a tag, dispatches
    `guest-review.yml` on the monorepo.
 
 ## Secrets
@@ -59,9 +68,9 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 | Secret | Used by | Scope |
 |---|---|---|
 | `APP_PRIVATE_KEY` (+ variable `APP_CLIENT_ID`) | `poll`, `fetch`, `report`, `request` | the private key of the GitHub App **willoughby-apps-bot** (client ID `Iv23liiTpvQBZ5cbNj7a`, installed on the guest repos only, never this one). Never used directly: each of those jobs mints its own installation token with `actions/create-github-app-token`, **limited to the one guest repo** it works on and to the permissions that job needs (table below), and the token is revoked when the job ends. |
-| `MONOREPO_DISPATCH` | `request`, `poll` | fine-grained PAT on `ajcohen9/willoughby`: Actions write. `request` dispatches `guest-review.yml`, `poll` dispatches `guest-apple.yml` (a changed `testers.txt`). |
+| `MONOREPO_DISPATCH` | `request` | fine-grained PAT on `ajcohen9/willoughby`: Actions write. `request` dispatches `guest-review.yml` for a tag. (`poll` no longer dispatches `guest-apple.yml`: tester lists take effect only from an approved commit.) |
 | `INVITE_CODES` | `enroll` | JSON `{sha256(code): {"repo", "guest"}}`, re-set as a whole from stdin by `python3 -m onboard` on the Mini (`gh secret set`), never printed. The codes themselves live only in Andrew's registry `~/.config/willoughby-apps/invites.json` (0600). |
-| `PIPELINE_PRIVATE_KEY` | `report` | the age identity for `keys/pipeline.age.pub` (`guest-apps/scripts/pipeline_keypair.sh`). The Mini holds the same key to decrypt the unsigned build. |
+| `PIPELINE_PRIVATE_KEY` | `report`, `request` | the age identity for `keys/pipeline.age.pub` (`guest-apps/scripts/pipeline_keypair.sh`). The Mini holds the same key to decrypt the unsigned build. |
 
 The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
 

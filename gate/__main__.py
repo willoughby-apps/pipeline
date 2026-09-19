@@ -1,4 +1,5 @@
 """CLI: python3 -m gate check <repo_dir> --bundle-id <id> [--policy P] [--json OUT]
+     python3 -m gate changes <repo_dir> [--base <approved_dir>] [--policy P] --json OUT
 
 Exit 0 only when the gate passed. 1 = blocked. Anything else (a crash, bad
 arguments) is also non-zero, so a caller that treats "not 0" as blocked fails
@@ -22,7 +23,15 @@ def main(argv=None) -> int:
     chk.add_argument("--bundle-id", required=True, help="the bundle id Andrew approved for this app")
     chk.add_argument("--policy", help="policy.yml path (default: guest-apps/policy/policy.yml)")
     chk.add_argument("--json", dest="json_out", help="write the full JSON report here")
+    chg = sub.add_parser("changes", help="what a request changes since the approved tree (gate/changes.py)")
+    chg.add_argument("repo_dir")
+    chg.add_argument("--base", help="the approved commit's tree (omit when nothing is approved yet)")
+    chg.add_argument("--policy", help="policy.yml path (default: guest-apps/policy/policy.yml)")
+    chg.add_argument("--json", dest="json_out", required=True, help="write the summary here")
     args = parser.parse_args(argv)
+    if args.cmd == "changes":
+        from . import changes
+        return changes.main(args)
 
     report = check_repo(args.repo_dir, args.bundle_id, policy=load_policy(args.policy))
     text = json.dumps(report, indent=2, sort_keys=True)

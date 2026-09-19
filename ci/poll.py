@@ -24,20 +24,18 @@ Per guest, at most DAILY_CAP checks start per UTC day, counted from check.yml's
 own runs (their run-name carries the repo). Past the cap the commit gets a
 `pending` "Waiting" status and is picked up the next day.
 
-**Testers (PLAN section 8).** For each guest repo whose default-branch head H
-passed its check (the bot's `willoughby/check` status is success), the commit
-C that last changed `testers.txt` as of H (`GET .../commits?sha=H&path=testers.txt`)
-is looked up; when C carries no `willoughby/testers` status of ours,
-`guest-apple.yml` is dispatched on ajcohen9/willoughby with (repo, H, C) and C
-is marked `pending` there, which is what stops the next poll from dispatching
-it again. A `pending` of ours older than TESTERS_STALE is dispatched again: the
-Mini's run replaces it with `success` or `error`, so one still pending that
-long was never run or never finished (a cancelled queue entry, a timeout
-before the report, a Mini that was off). A sync is idempotent, so a second
-one is harmless. The Mini reads the file at H as data and syncs the app's external
-TestFlight group to it. This needs MONOREPO_DISPATCH (Actions write on the
-monorepo); without it the testers step is skipped. It never counts towards
-the daily cap: nothing is built.
+**Testers requests (PLAN section 1, 2026-09-19 decision c).** A guest's
+tester change takes effect only when Andrew approves it, so poll never hands
+a pushed `testers.txt` to the Mini. Instead, for each guest repo whose
+default-branch head H differs from A, the last commit Andrew approved (the
+repo's org-owned `approved_sha` custom property, which his reconciler sets and
+a collaborator cannot), GitHub's compare of A...H is read: when H is ahead of
+A and the only files changed are `testers.txt` (plus Andrew's managed files),
+check.yml runs at H with kind `testers` (gate and change summary, nothing
+built), which opens a "Testers request" for Andrew. H is marked `pending` in
+`willoughby/testers-request` first-come like any check, and it counts
+towards the daily cap. Anything else that changed means the change waits for
+a release, which Andrew approves as a whole.
 """
 from __future__ import annotations
 
@@ -52,29 +50,31 @@ from ghapi import (APP_TOKEN_ENV, BOT_LOGIN, ORG, PIPELINE_REPO, REPO_NAME_RE, R
                    Client, GitHubError)
 
 DAILY_CAP = 20
-CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release"}
-TESTERS_CONTEXT = "willoughby/testers"
+CONTEXTS = {"push": "willoughby/check", "tag": "willoughby/release", "testers": "willoughby/testers-request"}
 TESTERS_FILE = "testers.txt"
-MONOREPO = "ajcohen9/willoughby"
-APPLE_WORKFLOW = "guest-apple.yml"
+# A change of only these since the approved commit is a testers request (the
+# Mini's common/approvals.py TESTERS_ONLY_PATHS; a test pins the two).
+TESTERS_ONLY_PATHS = ("testers.txt", ".claude/settings.json", "CLAUDE.md")
 WAITING = "Waiting:"
-# guest-apple.yml's job has timeout-minutes 60 and queues (`queue: max`) behind
-# at most a build hand-off of the same repo, itself up to 60: three hours is
-# past anything that is still coming.
-TESTERS_STALE = dt.timedelta(hours=3)
 MAX_BRANCHES = 30
 MAX_TAGS = 30
 
 
-def guest_repos(org: Client) -> dict[str, str]:
-    """{repo: guest} for every repo onboarding labelled."""
+def repo_properties(org: Client) -> dict[str, dict]:
+    """{repo: its custom properties} for every repo onboarding labelled."""
     out = {}
     for row in org.paginate(f"/orgs/{ORG}/properties/values"):
         props = {p["property_name"]: p["value"] for p in row.get("properties", [])}
         name = row.get("repository_name", "")
         if props.get("bundle_id") and REPO_NAME_RE.fullmatch(name) and name not in RESERVED_REPOS:
-            out[name] = props.get("guest") or name.split("-", 1)[0]
+            out[name] = props
     return out
+
+
+def guest_repos(org: Client, props: dict | None = None) -> dict[str, str]:
+    """{repo: guest} for every repo onboarding labelled."""
+    props = repo_properties(org) if props is None else props
+    return {name: p.get("guest") or name.split("-", 1)[0] for name, p in props.items()}
 
 
 def candidates(org: Client, repo: str) -> list[tuple[str, str, str]]:
@@ -124,83 +124,44 @@ def checks_today(pipeline: Client, repos: dict[str, str], today: dt.date) -> dic
     return counts
 
 
-def stale_pending(status: dict, now: dt.datetime) -> bool:
-    """A `pending` of ours that no run has replaced within TESTERS_STALE."""
-    if status.get("state") != "pending":
-        return False
-    try:
-        at = dt.datetime.fromisoformat((status.get("updated_at") or status.get("created_at") or "").replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    if at.tzinfo is None:
-        return False
-    return now - at > TESTERS_STALE
-
-
-def testers_change(org: Client, repo: str, login: str, now: dt.datetime | None = None) -> tuple[str, str] | None:
-    """(H, C) when the default branch head H passed its check and C, the commit
-    that last changed testers.txt as of H, has no testers status of ours yet, or
-    only a `pending` one gone stale."""
+def testers_request(org: Client, repo: str, approved: str) -> str | None:
+    """H, the default-branch head, when it is ahead of the approved commit and
+    the only files changed are the tester list (and Andrew's managed files)."""
+    if not SHA_RE.fullmatch(approved or ""):
+        return None
     default = (org.get(f"/repos/{ORG}/{repo}") or {}).get("default_branch") or ""
     if not default:
         return None
     head = ((org.get(f"/repos/{ORG}/{repo}/branches/{default}") or {}).get("commit") or {}).get("sha") or ""
-    if not SHA_RE.fullmatch(head):
+    if not SHA_RE.fullmatch(head) or head == approved:
         return None
-    checked = our_status(org.paginate(f"/repos/{ORG}/{repo}/commits/{head}/statuses", limit=100),
-                         CONTEXTS["push"], login)
-    if not checked or checked.get("state") != "success":
+    cmp = org.get(f"/repos/{ORG}/{repo}/compare/{approved}...{head}") or {}
+    files = {f.get("filename") or "" for f in cmp.get("files") or []}
+    if cmp.get("status") != "ahead" or len(cmp.get("files") or []) >= 300:
         return None
-    changes = org.get(f"/repos/{ORG}/{repo}/commits?sha={head}&path={TESTERS_FILE}&per_page=1") or []
-    change = (changes[0] or {}).get("sha", "") if changes else ""
-    if not SHA_RE.fullmatch(change):
+    if TESTERS_FILE not in files or not files <= set(TESTERS_ONLY_PATHS):
         return None
-    ours = our_status(org.paginate(f"/repos/{ORG}/{repo}/commits/{change}/statuses", limit=100),
-                      TESTERS_CONTEXT, login)
-    if ours and not stale_pending(ours, now or dt.datetime.now(dt.timezone.utc)):
-        return None
-    return head, change
+    return head
 
 
-def poll_testers(org: Client, mono: Client | None, repos: dict[str, str], dry_run: bool,
-                 now: dt.datetime | None = None) -> list[tuple]:
-    login = BOT_LOGIN
-    actions = []
-    for repo in sorted(repos):
-        try:
-            found = testers_change(org, repo, login, now)
-        except GitHubError as e:
-            # One repo's lookup failing (say, an empty repo) never stops the checks.
-            print(f"testers: {repo} skipped (HTTP {e.status})")
-            continue
-        if not found:
-            continue
-        head, change = found
-        actions.append(("testers", repo, head, "testers", change))
-        if dry_run or mono is None:
-            continue
-        try:
-            mono.post(f"/repos/{MONOREPO}/actions/workflows/{APPLE_WORKFLOW}/dispatches", {
-                "ref": "main", "inputs": {"repo": repo, "sha": head, "change": change}})
-        except GitHubError as e:
-            # Not marked pending, so the next poll tries again.
-            print(f"testers: could not start {APPLE_WORKFLOW} for {repo} (HTTP {e.status})")
-            continue
-        org.post(f"/repos/{ORG}/{repo}/statuses/{change}", {
-            "state": "pending", "context": TESTERS_CONTEXT,
-            "description": "Queued: updating the TestFlight testers from testers.txt."})
-    return actions
-
-
-def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False,
-         mono: Client | None = None, now: dt.datetime | None = None) -> list[tuple]:
+def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False) -> list[tuple]:
     login = BOT_LOGIN  # an installation token cannot call GET /user
-    repos = guest_repos(org)
+    props = repo_properties(org)
+    repos = guest_repos(org, props)
     counts = checks_today(pipeline, repos, today)
     actions = []
     for repo in sorted(repos):
         guest = repos[repo]
-        for sha, kind, tag in candidates(org, repo):
+        found = candidates(org, repo)
+        try:
+            head = testers_request(org, repo, props[repo].get("approved_sha") or "")
+        except GitHubError as e:
+            # One repo's lookup failing (say, an empty repo) never stops the checks.
+            print(f"testers: {repo} skipped (HTTP {e.status})")
+            head = None
+        if head:
+            found.append((head, "testers", ""))
+        for sha, kind, tag in found:
             context = CONTEXTS[kind]
             statuses = org.paginate(f"/repos/{ORG}/{repo}/commits/{sha}/statuses", limit=100)
             if not needs_check(statuses, context, login):
@@ -221,9 +182,10 @@ def poll(org: Client, pipeline: Client, today: dt.date, dry_run: bool = False,
                 "ref": "main", "inputs": {"repo": repo, "sha": sha, "kind": kind, "tag": tag}})
             org.post(f"/repos/{ORG}/{repo}/statuses/{sha}", {
                 "state": "pending", "context": context,
-                "description": "Queued: checking and building this commit.",
+                "description": ("Queued: asking Andrew to approve the new tester list." if kind == "testers"
+                                else "Queued: checking and building this commit."),
                 "target_url": f"https://github.com/{PIPELINE_REPO}/actions/workflows/check.yml"})
-    return actions + poll_testers(org, mono, repos, dry_run, now)
+    return actions
 
 
 def write_repos_output(names: list[str]) -> None:
@@ -250,17 +212,13 @@ def main(argv=None) -> int:
         print(f"{len(names)} guest repo(s)")
         return 0
     pipeline = Client.from_env("GITHUB_TOKEN")
-    mono = Client(os.environ["MONOREPO_DISPATCH"]) if os.environ.get("MONOREPO_DISPATCH") else None
-    actions = poll(org, pipeline, dt.datetime.now(dt.timezone.utc).date(), args.dry_run, mono)
+    actions = poll(org, pipeline, dt.datetime.now(dt.timezone.utc).date(), args.dry_run)
     started = sum(1 for a in actions if a[0] == "check")
     waiting = sum(1 for a in actions if a[0] == "wait")
-    testers = sum(1 for a in actions if a[0] == "testers")
+    testers = sum(1 for a in actions if a[0] == "check" and a[3] == "testers")
     # Counts only: repo names and SHAs are not secret, but nothing guest-written is printed.
-    print(f"{'would start' if args.dry_run else 'started'} {started} check(s); {waiting} waiting on the daily cap")
-    if testers and mono is None and not args.dry_run:
-        print(f"{testers} tester list(s) changed, not synced: MONOREPO_DISPATCH is not set")
-    else:
-        print(f"{'would sync' if args.dry_run else 'syncing'} {testers} tester list(s)")
+    print(f"{'would start' if args.dry_run else 'started'} {started} check(s), {testers} of them tester-list "
+          f"requests; {waiting} waiting on the daily cap")
     return 0
 
 

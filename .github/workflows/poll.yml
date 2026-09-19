@@ -1,9 +1,17 @@
 # Every 5 minutes: start check.yml for each new branch head and v* tag in the
-# guest repos, and guest-apple.yml on the monorepo for a testers.txt changed
-# at a checked head (ci/poll.py), with two app tokens: one that can only list
-# the guest repos, then one limited to exactly those repos. A workflow_dispatch sent with GITHUB_TOKEN does
-# create a run (GitHub docs, "Triggering a workflow": "workflow_dispatch and
-# repository_dispatch events always create workflow runs").
+# guest repos, and for a default-branch head whose only change since the
+# commit Andrew last approved is testers.txt (a testers request, nothing
+# built; ci/poll.py), with two app tokens: one that can only list the guest
+# repos, then one limited to exactly those repos.
+#
+# What starts it (audit 2026-09-19): GitHub ran this schedule twice in about
+# nine hours ("The schedule event can be delayed during periods of high loads
+# of GitHub Actions workflow runs ... some queued jobs may be dropped", GitHub
+# docs, events that trigger workflows). So the 5-minute tick is a launchd
+# agent on Andrew's Mini sending a workflow_dispatch (`gh workflow run
+# poll.yml`), and a workflow_dispatch "always create[s] workflow runs" (same
+# docs). The cron below is only a backup, off the top of the hour, where
+# GitHub's load peaks; the `poll` concurrency group absorbs a duplicate.
 #
 # GitHub disables a public repo's scheduled workflows after 60 days with no
 # repository activity; README.md says how that is kept from happening.
@@ -11,7 +19,7 @@ name: poll
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "3-58/5 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -69,13 +77,12 @@ jobs:
           permission-statuses: write
           permission-organization-custom-properties: read
 
-      # MONOREPO_DISPATCH starts guest-apple.yml on the Mini when a checked
-      # head changed testers.txt. This job runs no guest code and installs nothing.
-      - name: Find new commits and start their checks; hand changed tester lists to the Mini
+      # This job runs no guest code and installs nothing; it never hands a
+      # pushed tester list to the Mini (only an approved commit's list applies).
+      - name: Find new commits and start their checks (tester-only changes become testers requests)
         if: steps.list.outputs.repos != ''
         env:
           APP_TOKEN: ${{ steps.app.outputs.token }}
           GITHUB_TOKEN: ${{ github.token }}
-          MONOREPO_DISPATCH: ${{ secrets.MONOREPO_DISPATCH }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
         run: python3 ci/poll.py ${DRY_RUN:+--dry-run}
