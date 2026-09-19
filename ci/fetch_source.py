@@ -1,11 +1,16 @@
 """Gate job: resolve the app, verify the commit, download the guest repo as data.
 
     ORG_TOKEN=... REPO=sam-hello SHA=<40 hex> KIND=push|tag TAG=v1.2 \\
-        python3 ci/fetch_source.py OUT_TARBALL
+        python3 ci/fetch_source.py OUT_TARBALL OUT_TREE_JSON
 
 No git runs on guest content: the tree comes from GitHub's tarball endpoint for
 that exact SHA, so no hook, filter, LFS smudge or `.git/config` of the guest's
 can do anything. Writes `bundle_id` and `tree_sha` to $GITHUB_OUTPUT.
+
+The tarball is `git archive` output, which applies the repo's own
+`.gitattributes` (export-subst, export-ignore). So the commit's tree listing is
+saved beside it (OUT_TREE_JSON, never printed: it names guest files), and
+`ci/unpack.py --tree` refuses an archive that is not exactly that tree.
 
 The bundle ID comes from the repo's `bundle_id` custom property, which only an
 org owner can set (a guest collaborator cannot), never from the guest's files.
@@ -13,6 +18,7 @@ Prints nothing guest-written: the log of this public repo is public.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -55,6 +61,15 @@ def verify_commit(client: Client, repo: str, sha: str, kind: str, tag: str) -> s
     return commit["tree"]["sha"]
 
 
+def tree_listing(client: Client, repo: str, tree_sha: str) -> dict:
+    """The commit's whole tree, recursively ({"tree": [...], "truncated": bool})."""
+    listing = client.get(f"/repos/{ORG}/{repo}/git/trees/{tree_sha}?recursive=1")
+    if not isinstance(listing, dict) or listing.get("sha") != tree_sha:
+        raise SystemExit("the tree listing is not the commit's tree")
+    return {"sha": tree_sha, "truncated": listing.get("truncated"), "tree": [
+        {k: e.get(k) for k in ("path", "mode", "type", "sha")} for e in listing.get("tree") or []]}
+
+
 def write_outputs(**values: str) -> None:
     path = os.environ.get("GITHUB_OUTPUT")
     if not path:
@@ -68,7 +83,7 @@ def write_outputs(**values: str) -> None:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if len(argv) != 1:
+    if len(argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2
     repo, sha = os.environ.get("REPO", ""), os.environ.get("SHA", "")
@@ -79,6 +94,7 @@ def main(argv=None) -> int:
     try:
         tree_sha = verify_commit(client, repo, sha, kind, tag)
         size = client.download(f"/repos/{ORG}/{repo}/tarball/{sha}", argv[0], MAX_TARBALL_BYTES)
+        Path(argv[1]).write_text(json.dumps(tree_listing(client, repo, tree_sha)))
     except GitHubError as e:
         raise SystemExit(f"GitHub refused: HTTP {e.status}") from None
     write_outputs(bundle_id=bundle_id, tree_sha=tree_sha)

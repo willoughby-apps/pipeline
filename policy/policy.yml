@@ -226,7 +226,15 @@ files:
     "gitleaks:allow": "silences the secret scanner on that line"
     "nosemgrep": "silences the code scanner on that line"
     "nosem:": "silences the code scanner on that line"
-  gitattributes_forbidden: ["filter=", "diff=", "merge="]
+  # Attributes a .gitattributes line may not set (setting is `attr` or
+  # `attr=value`; `-attr` and `!attr` are fine). filter/diff/merge name helper
+  # programs git runs. The pipeline builds from GitHub's tarball, which is `git
+  # archive` output: export-subst rewrites `$Format:...$` in a file with commit
+  # data (the commit message, say), export-ignore leaves a file out, and ident
+  # and working-tree-encoding rewrite a file's bytes, so each would make what is
+  # built differ from the tree people and the review read. ci/unpack.py also
+  # compares every unpacked file with the commit's tree.
+  gitattributes_forbidden: [filter, diff, merge, export-subst, export-ignore, ident, working-tree-encoding]
 
 swift:
   # Source text that declares or implements a Swift macro or package plugin.
@@ -345,6 +353,32 @@ infrastructure:
       what: "A private-network IP address (172.16 to 172.31, then two more numbers)"
     - pattern: '(?<![\d.])127\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![\d])|\blocalhost\b'
       what: "This computer (`local` then `host`, or 127 then three more numbers), which on a phone is nothing and on a build machine is Andrew's"
+    - pattern: '(?<![\d.])169\.254\.\d{1,3}\.\d{1,3}(?![\d])'
+      what: "A link-local IP address (169.254, then two more numbers): a router, a printer, or a cloud machine's own metadata service"
+    - pattern: '(?<![\d.])0\.0\.0\.0(?![\d.])'
+      what: "The any-address (four zeros joined by dots), which reaches this device's own servers"
+    - pattern: '(?:(?<=["''/@>=])|(?<![\w.-])(?=[a-z0-9]+(?:-[a-z0-9]+)+\.))[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.local\.?(?![\w-]|\.[a-z0-9])'
+      what: "A home-network name ending in `.local` (Bonjour), such as the Mini's or Home Assistant's, written in quotes, after `//`, `@`, `=` or `>`, or with a hyphen in its first part"
+    - pattern: '(?<![\w+.-])(?:https?|wss?|ftp)://(?:[^\s/?#@"''<>]*@)?(?!local[h]ost(?![\w-]))(?!0x[0-9a-f]+(?=[:/?#"''<>\s)\]]|$))(?=[a-z0-9_-]*[a-z_-])[a-z0-9_-]+(?=[:/?#"''<>\s)\]]|$)'
+      what: "A web address whose server name has no dot (a bare machine name, which a phone looks up on whatever private network it is on, Andrew's tailnet included)"
+    - pattern: '(?<![\w+.-])(?:https?|wss?|ftp)://(?:[^\s/?#@"''<>]*@)?(?!(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?=[:/?#"''<>\s)\]]|$))(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){0,3}(?=[:/?#"''<>\s)\]]|$)'
+      what: "A web address whose server is a number not written as four plain numbers from 0 to 255 joined by dots (one big number, hex, octal or a shortened form), which is how a private address hides"
+    - pattern: '(?<![\w:.])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f])(?::[0-9a-f]{0,4}){2,7}(?![\w:])'
+      what: "A private or link-local IPv6 address (starting fc, fd, or fe8 to feb, then colons): every Tailscale device has one, starting fd7a then 115c"
+    - pattern: '(?<![\w:])(?::[:]1(?![\w:])|(?:0{1,4}:){7}0{0,3}1(?![\w:])|:[:]ffff:(?=[0-9a-f])|(?:0{1,4}:){5}ffff:(?=[0-9a-f]))|\[:[:]\]'
+      what: "This device in IPv6 (two colons then 1, its long form, or two colons in square brackets) or an IPv4 address written as IPv6 (two colons then ffff)"
+  # Every file is also matched after decoding the escapes a build or runtime
+  # decodes into the same text: Swift `\u{2E}`, JSON/YAML `\u002E`, YAML
+  # `\x2E`/`\U0000002E`, .strings `\U002E`, XML/HTML `&#46;`/`&#x2E;` and a
+  # few named entities, and URL `%2E`, then Unicode NFKC with the ideographic
+  # full stops a URL parser treats as dots. A match in either form fails.
+  #
+  # NSAppTransportSecurity keys the app may declare (in project.yml info
+  # properties, an INFOPLIST_KEY_ setting or any Info.plist the build reads).
+  # Empty: the app never loosens App Transport Security, so plain http, and
+  # with it a guest app calling the Mini or Home Assistant from Andrew's phone
+  # on the tailnet or home Wi-Fi, is refused by iOS itself.
+  ats_allowed_keys: []
 
 secrets:
   # Credential shapes the gate refuses on its own, before and beside gitleaks.
@@ -374,11 +408,16 @@ scanners:
     help_argv: [gitleaks, dir, --help]
   osv-scanner:
     what: dependencies with known vulnerabilities
-    argv: [osv-scanner, scan, source, -r, --format, json, --output, "{report}", "{repo}"]
+    # --no-call-analysis all: Go call analysis is on by default and runs the Go
+    # toolchain over the scanned source (osv-scanner docs, "Scan source"; "all"
+    # turns every language off: cmd/osv-scanner/internal/helper/
+    # callanalysis_parser.go at v2.6.0). Scanners run even after a static
+    # failure, so this would reach a repo the gate already blocked.
+    argv: [osv-scanner, scan, source, -r, --no-call-analysis, all, --format, json, --output, "{report}", "{repo}"]
     # 128 is "No packages found": an app with no Swift packages is clean.
     ok_exit: [0, 128]
     findings_exit: [1]
-    help_flags: [--format, --output, --recursive]
+    help_flags: [--format, --output, --recursive, --no-call-analysis]
     help_argv: [osv-scanner, scan, source, --help]
   semgrep:
     what: risky Swift code (downloaded code, private APIs, script injection)
@@ -491,9 +530,9 @@ rules:
     plain_english: "A comment tries to silence a security scanner."
     fix_for_claude: "Remove the suppression comment. If the scanner is wrong, ask Andrew with /willoughby-apps:help."
   - id: files.gitattributes
-    guest_rule: "Never add git filters in `.gitattributes`."
-    plain_english: ".gitattributes asks git to run a helper program on files."
-    fix_for_claude: "Remove the filter=, diff= or merge= attributes from .gitattributes."
+    guest_rule: "Never add git filters, drivers or export settings in `.gitattributes` (the list is under Reference)."
+    plain_english: ".gitattributes asks git to run a helper program on files, or to change or leave out files when the code is packaged for the build."
+    fix_for_claude: "Remove the named attribute from .gitattributes (filter, diff, merge, export-subst, export-ignore, ident and working-tree-encoding are not allowed)."
   - id: swift.plugin_or_macro
     guest_rule: "No Swift macros and no package or compiler plugins."
     plain_english: "The code defines a Swift macro or plugin, which runs code on the build machine."
@@ -522,6 +561,10 @@ rules:
     guest_rule: "Your app brings its own server. Never make it talk to Andrew's servers, websites, private network or home network, and never write their addresses anywhere in the repo (the list is under Reference)."
     plain_english: "The app points at one of Andrew's own servers or networks. Guest apps must bring their own server: Andrew's are not available to them."
     fix_for_claude: "Remove every mention of the named address from the code, project.yml, resources and docs. If the feature needs a server, tell the guest in plain words that the app must bring its own (one they run or sign up for themselves), and ask Andrew with /willoughby-apps:help if unsure."
+  - id: infra.insecure_transport
+    guest_rule: "Never loosen App Transport Security (`NSAppTransportSecurity`): the app talks only to `https` servers, never plain `http` or the local network."
+    plain_english: "The app turns off part of iPhone's App Transport Security, which lets it talk to servers without encryption or on the local network."
+    fix_for_claude: "Remove NSAppTransportSecurity from project.yml and every Info.plist, and use an https:// address for the app's own server."
   - id: secrets.hardcoded
     guest_rule: "Never put API keys, tokens or passwords in the code. If a feature needs one, stop and ask Andrew with /willoughby-apps:help."
     plain_english: "A secret key or token is written into the code."

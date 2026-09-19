@@ -1,0 +1,4 @@
+# The gate's top-level Python dependencies. The gate job installs the hashed
+# lock, requirements-gate.txt, generated from this file (see its header).
+pyyaml==6.0.3
+semgrep==1.177.0

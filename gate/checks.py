@@ -243,6 +243,35 @@ def _binary_kind(ctx: Context, rel: str, data: bytes) -> str | None:
     return None
 
 
+def _gitattributes_set(text: str, forbidden) -> list[tuple[int, str]]:
+    """(line, attribute) for each forbidden attribute a .gitattributes line sets.
+
+    Parsed the way git's attr.c reads a line: blanks (space, tab, CR, LF) skipped,
+    a line whose first non-blank is `#` is a comment, then a pattern (or an
+    `[attr]name` macro definition) followed by attributes. `-attr` unsets and
+    `!attr` unspecifies, which change nothing; `attr` or `attr=value` set it.
+    Tokens are split on any whitespace, a superset of git's blanks, so the gate
+    can only see more attributes than git does, never fewer. `export-subst` and
+    `export-ignore` matter here because the pipeline builds from GitHub's
+    tarball, which is `git archive` output: one rewrites a file's text, the
+    other drops a file, so what is built would differ from the tree people and
+    the review read.
+    """
+    names = {str(n).rstrip("=").casefold() for n in forbidden}
+    found = []
+    for i, line in enumerate(text.split("\n"), 1):
+        body = line.strip(" \t\r\n")
+        if not body or body.startswith("#"):
+            continue
+        for tok in body.split()[1:]:
+            if tok.startswith(("-", "!")):
+                continue
+            attr = tok.split("=", 1)[0]
+            if attr.casefold() in names:
+                found.append((i, attr))
+    return found
+
+
 def check_contents(ctx: Context):
     pol = ctx.policy["files"]
     markers = pol["forbidden_text_markers"]
@@ -270,9 +299,8 @@ def check_contents(ctx: Context):
                     ctx.fail("secrets.hardcoded", rel, line, f"{rel} line {line} contains what looks like a {label}.")
         name = rel.rsplit("/", 1)[-1]
         if fold_name(name) == ".gitattributes":
-            for i, line in enumerate(text.splitlines(), 1):
-                if any(tok in line for tok in pol["gitattributes_forbidden"]):
-                    ctx.fail("files.gitattributes", rel, i, f"{rel} line {i} sets a git filter or driver.")
+            for i, attr in _gitattributes_set(text, pol["gitattributes_forbidden"]):
+                ctx.fail("files.gitattributes", rel, i, f"{rel} line {i} sets `{attr}`.")
         if rel.lower().endswith(".swift"):
             for rx, what in swift_res:
                 m = rx.search(text)
@@ -299,17 +327,69 @@ def _decoded(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# The escapes a compiler, a parser or a URL loader turns back into the same
+# characters: Swift \u{2E}; JSON/YAML/.strings \u002E and \U002E; YAML and C
+# \U0000002E and \x2E; XML/HTML &#46; &#x2E; (and a few named entities); URL %2E.
+_ESCAPE = re.compile(
+    r"\\u\{(?P<swift>[0-9a-fA-F]{1,8})\}"
+    r"|\\U(?P<u8>[0-9a-fA-F]{8})"
+    r"|\\[uU](?P<u4>[0-9a-fA-F]{4})"
+    r"|\\x(?P<x2>[0-9a-fA-F]{2})"
+    r"|&#[xX](?P<xmlhex>[0-9a-fA-F]{1,8});?"
+    r"|&#(?P<xmldec>[0-9]{1,10});?"
+    r"|&(?P<named>amp|period|colon|sol|quot|apos|lt|gt|commat|num|lsqb|rsqb|lbrack|rbrack);"
+    r"|%(?P<pct>[0-9a-fA-F]{2})")
+_NAMED = {"amp": "&", "period": ".", "colon": ":", "sol": "/", "quot": '"', "apos": "'", "lt": "<", "gt": ">",
+          "commat": "@", "num": "#", "lsqb": "[", "rsqb": "]", "lbrack": "[", "rbrack": "]"}
+# Full stops a URL parser (UTS 46) maps to "." after NFKC has folded the
+# fullwidth forms.
+_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+
+
+def _unescape_once(text: str) -> str:
+    def repl(m):
+        if m.group("named"):
+            return _NAMED[m.group("named")]
+        code = next(v for k, v in m.groupdict().items() if v is not None and k != "named")
+        n = int(code, 10 if m.group("xmldec") else 16)
+        if m.group("u8") and not 0 < n <= 0x10FFFF:
+            # Not an 8-digit code point, so the .strings 4-digit form: \U003A then text.
+            n, rest = int(code[:4], 16), code[4:]
+            return chr(n) + rest if n else m.group(0)
+        return chr(n) if 0 < n <= 0x10FFFF else m.group(0)
+    return _ESCAPE.sub(repl, text)
+
+
+def host_forms(line: str) -> list[str]:
+    """The line as written, and as it reads once escapes are decoded (up to
+    three layers, for `&amp;#46;`) and Unicode is folded the way a URL parser
+    folds a host name."""
+    decoded = line
+    for _ in range(3):
+        nxt = _unescape_once(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    folded = unicodedata.normalize("NFKC", decoded).translate(_DOTS)
+    return [line] if folded == line else [line, folded]
+
+
 def check_infrastructure(ctx: Context):
-    """No file may name Andrew's own servers or networks: the app brings its own."""
+    """No file may name Andrew's own servers or networks: the app brings its own.
+
+    Matched line by line, on the text as written and as decoded (host_forms),
+    so an address spelled with escapes a build or the app turns back into
+    characters is still the address."""
     hosts = [(re.compile(h["pattern"], re.IGNORECASE), h["what"])
              for h in ctx.policy["infrastructure"]["forbidden_hosts"]]
     for rel, data in sorted(ctx.contents.items()):
         text = _decoded(data)
-        for rx, what in hosts:
-            for m in rx.finditer(text):
-                line = _line_of(text, m.start())
-                ctx.fail("infra.andrews_servers", rel, line,
-                         f"{rel} line {line} names {m.group(0)!r}: {what}.")
+        for line_no, line in enumerate(text.split("\n"), 1):
+            for form in host_forms(line):
+                for rx, what in hosts:
+                    for m in rx.finditer(form):
+                        ctx.fail("infra.andrews_servers", rel, line_no,
+                                 f"{rel} line {line_no} names {m.group(0)!r}: {what}.")
 
 
 # ------------------------------------------------------------- project.yml
@@ -866,6 +946,43 @@ def check_info_and_usage(ctx: Context, spec: ProjectSpec | None):
                      f"{readme_rel} does not list {key}.")
 
 
+# ------------------------------------------------- app transport security
+
+ATS_KEY = "NSAppTransportSecurity"
+
+
+def check_transport_security(ctx: Context, spec: ProjectSpec | None):
+    """NSAppTransportSecurity may hold only `infrastructure.ats_allowed_keys`
+    (none today), wherever the app's Info.plist is built from: every source is
+    checked, not just the one that wins the merge."""
+    allowed = set(ctx.policy["infrastructure"]["ats_allowed_keys"] or [])
+    ptl = ctx.policy["project_yml"]["path"]
+    sources = []  # (value, file, line)
+    plists = {rel for rel in ctx.contents if fold_name(rel.rsplit("/", 1)[-1]) == "info.plist"}
+    if spec:
+        for key, value, line, _ in spec.settings:
+            if str(key) == "INFOPLIST_KEY_" + ATS_KEY:
+                sources.append((value, ptl, line))
+        if ATS_KEY in spec.info_properties:
+            value, line = spec.info_properties[ATS_KEY]
+            sources.append((value, ptl, line))
+        plists |= {ctx.find(p) for p, _ in spec.referenced_paths.get("info", [])} - {None}
+        # A target's `info: path:` (XcodeGen writes it; a committed copy is read too).
+        plists |= {rel for rel in ctx.contents if fold_path(rel) in spec.generated_paths}
+    for rel in sorted(plists):
+        value, err = _read_plist(ctx, rel)
+        if not err and ATS_KEY in value:
+            sources.append((value[ATS_KEY], rel, None))
+    for value, file, line in sources:
+        if isinstance(value, dict):
+            bad = sorted(str(k) for k in value if k not in allowed)
+        else:
+            bad = [] if value in (None, "") else [f"{ATS_KEY} = {str(value)[:80]!r}"]
+        for k in bad:
+            ctx.fail("infra.insecure_transport", file, line,
+                     f"{file} sets {k} under {ATS_KEY}, which is not allowed.")
+
+
 # ------------------------------------------------------------------ bundle
 
 
@@ -889,4 +1006,5 @@ def run_static_checks(ctx: Context):
         # Without a readable project.yml the declarations are unknown; that is
         # already a hard failure, and guessing here would only add noise.
         check_info_and_usage(ctx, spec)
+    check_transport_security(ctx, spec)
     return spec

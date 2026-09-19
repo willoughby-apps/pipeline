@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -42,6 +43,27 @@ def _load_json(path: Path) -> dict | None:
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
+
+
+# The preview job ran the guest's app, which could rewrite its result.json.
+# Nothing from it reaches the markdown outside a code fence as written: the
+# stage becomes one of our own words and the device must look like a simulator
+# name, or the comment (posted as the ORG_TOKEN user, Andrew's account) could
+# carry an @mention or a link in his voice.
+PREVIEW_STAGES = {"device": "finding a simulator", "boot": "starting the simulator",
+                  "install": "installing the app", "launch": "opening the app",
+                  "screenshot": "taking the screenshot", "done": "done"}
+BUILD_STAGES = {"xcodegen": "generating the project", "list": "reading the project",
+                "archive": "building for iPhone", "simulator": "building for the simulator", "done": "done"}
+DEVICE_RE = re.compile(r"iPhone(?: [A-Za-z0-9]{1,12}){0,4}")
+
+
+def _stage(value, known: dict) -> str:
+    return known.get(value, "an unknown step") if isinstance(value, str) else "an unknown step"
+
+
+def _device(value) -> str:
+    return value if isinstance(value, str) and DEVICE_RE.fullmatch(value) else "iPhone"
 
 
 def _text(value, limit=400) -> str:
@@ -88,20 +110,20 @@ def verdict(env: dict, reports: Path) -> dict:
                 if e.get("line"):
                     where += f":{int(e['line'])}"
                 lines.append(f"{where + ': ' if where else ''}{_text(e.get('message'))}")
-            sections.append(("Compile errors", "\n".join(lines) or f"(failed at {_text(build.get('stage'), 40)}; no error lines found)"))
+            sections.append(("Compile errors", "\n".join(lines) or f"(failed at {_stage(build.get('stage'), BUILD_STAGES)}; no error lines found)"))
             return {"state": "failure", "description": "Did not compile.",
                     "headline": "Passed the safety checks, but the app did not compile.", "sections": sections}
         return {"state": "error", "description": "The build could not run (a pipeline problem).",
                 "headline": "The build could not run. This is a problem with the pipeline, not with your code: push again later, or ask Andrew with /willoughby-apps:help if it keeps happening.", "sections": sections}
     if not (preview and preview.get("ok") is True):
-        stage = _text((preview or {}).get("stage") or "unknown", 40)
+        stage = _stage((preview or {}).get("stage"), PREVIEW_STAGES)
         return {"state": "failure", "description": "Compiles, but did not open in the simulator.",
                 "headline": f"Compiles, but the app did not open in the iPhone simulator (stopped at: {stage}).",
                 "sections": sections}
     ipa = env.get("IPA_SHA256", "")
     desc = "Passed: builds and opens." + (f" unsigned sha256 {ipa}" if len(ipa) == 64 else "")
     return {"state": "success", "description": desc,
-            "headline": f"Passed: it builds and opens on an {_text(preview.get('device'), 40)} simulator.",
+            "headline": f"Passed: it builds and opens on an {_device(preview.get('device'))} simulator.",
             "sections": sections}
 
 

@@ -10,8 +10,16 @@
 2. Dispatches `guest-review.yml` on ajcohen9/willoughby with the same pins, so
    the advisory review is posted on the issue.
 
+Only an issue the ORG_TOKEN's own user opened is reused. A guest has write on
+their repo, so they can open "Release request: v1.1" with the label before
+tagging; reusing it would put our pins into an issue whose body they can edit
+afterwards. The pin block is for people to read: a guest with write can edit
+any issue body in their repo, even ours, so nothing may take pins from it
+(PLAN sections 4 and 5: consumers read the `willoughby/release` status our user
+created, plus the run).
+
 Every value here is either ours or validated (repo name, 40-hex SHA, v1.2.3
-tag, numeric run id, 64-hex digest); no guest-written text is used.
+tag, numeric run id, 64-hex digests); no guest-written text is used.
 """
 from __future__ import annotations
 
@@ -32,7 +40,8 @@ def issue_title(tag: str) -> str:
     return f"Release request: {tag}"
 
 
-def issue_body(repo: str, sha: str, tag: str, run_id: str, run_url: str, ipa_sha256: str) -> str:
+def issue_body(repo: str, sha: str, tag: str, run_id: str, run_url: str, ipa_sha256: str,
+               source_sha256: str) -> str:
     return "\n".join([
         f"Version **{tag}** passed the safety checks, compiles and opens in the simulator.",
         "",
@@ -44,15 +53,19 @@ def issue_body(repo: str, sha: str, tag: str, run_id: str, run_url: str, ipa_sha
         f"tag: {tag}",
         f"pipeline_run: {run_id}",
         f"unsigned_sha256: {ipa_sha256}",
+        f"source_sha256: {source_sha256}",
         "-->",
         f"Commit: {sha}",
         f"Pipeline run: {run_url}",
     ])
 
 
-def find_open_request(client: Client, repo: str, tag: str) -> dict | None:
+def find_open_request(client: Client, repo: str, tag: str, login: str) -> dict | None:
+    """Our own open request issue for `tag`. An issue anyone else opened (the
+    guest can, with the same title and label) is never reused."""
     for issue in client.paginate(f"/repos/{ORG}/{repo}/issues?state=open&labels={LABEL}", limit=300):
-        if issue.get("title") == issue_title(tag) and "pull_request" not in issue:
+        if (issue.get("title") == issue_title(tag) and "pull_request" not in issue
+                and (issue.get("user") or {}).get("login") == login):
             return issue
     return None
 
@@ -60,13 +73,15 @@ def find_open_request(client: Client, repo: str, tag: str) -> dict | None:
 def main() -> int:
     repo, sha, tag = os.environ.get("REPO", ""), os.environ.get("SHA", ""), os.environ.get("TAG", "")
     run_id, run_url = os.environ.get("RUN_ID", ""), os.environ.get("RUN_URL", "")
-    ipa = os.environ.get("IPA_SHA256", "")
+    ipa, source = os.environ.get("IPA_SHA256", ""), os.environ.get("SOURCE_SHA256", "")
     validate_inputs(repo, sha, "tag", tag)
-    if not re.fullmatch(r"[0-9]{1,20}", run_id) or not re.fullmatch(r"[0-9a-f]{64}", ipa):
-        raise SystemExit("run id or unsigned build digest missing")
+    if not re.fullmatch(r"[0-9]{1,20}", run_id) or not re.fullmatch(r"[0-9a-f]{64}", ipa) \
+            or not re.fullmatch(r"[0-9a-f]{64}", source):
+        raise SystemExit("run id, unsigned build digest or source digest missing")
     org = Client.from_env("ORG_TOKEN")
-    body = issue_body(repo, sha, tag, run_id, run_url, ipa)
-    existing = find_open_request(org, repo, tag)
+    login = org.get("/user")["login"]
+    body = issue_body(repo, sha, tag, run_id, run_url, ipa, source)
+    existing = find_open_request(org, repo, tag, login)
     if existing:
         # Same tag re-checked (say, after an expired artifact): re-pin the same issue.
         org.json("PATCH", f"/repos/{ORG}/{repo}/issues/{existing['number']}", {"body": body})
@@ -79,7 +94,8 @@ def main() -> int:
     try:
         mono.post(f"/repos/{MONOREPO}/actions/workflows/{REVIEW_WORKFLOW}/dispatches", {
             "ref": "main",
-            "inputs": {"repo": f"{ORG}/{repo}", "sha": sha, "tag": tag, "issue": str(number), "run_id": run_id}})
+            "inputs": {"repo": f"{ORG}/{repo}", "sha": sha, "tag": tag, "issue": str(number), "run_id": run_id,
+                       "source_sha256": source}})
     except GitHubError as e:
         raise SystemExit(f"could not start {REVIEW_WORKFLOW} on {MONOREPO}: HTTP {e.status}") from None
     print(f"dispatched {REVIEW_WORKFLOW}")
