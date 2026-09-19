@@ -5,28 +5,42 @@ A new guest's `/willoughby-apps:setup CODE` opens an issue here in the format
 log are public. Three steps, each its own command:
 
     redeem   (GITHUB_TOKEN, INVITE_CODES)  blank the issue first, check the
-             author's request count, parse, look the code up; the one guest
-             repo goes to a masked step output, never to the log.
+             author's request count, parse, refuse a code presented before,
+             look the code up, and post the one comment, which records this
+             code as presented; the one guest repo goes to a masked step
+             output, never to the log.
     invite   (APP_TOKEN: the app, that one repo, administration write)
              refuse a spent code, invite the author with push permission,
              and undo the invitation if another one won a race.
-    finish   (GITHUB_TOKEN)  blank the issue again, one neutral comment,
-             close, lock. Runs whatever happened before it.
+    finish   (GITHUB_TOKEN)  blank the issue again, the comment if redeem
+             did not get that far, close, lock. Runs whatever happened before it.
 
 Untrusted text (number, title, body, author) is read from the event file
 ($GITHUB_EVENT_PATH) and never printed. Never from env: a step's env values
 are printed in its public log header, which put a code in the log on the
 first live run (2026-09-19). INVITE_CODES is a repo secret, JSON {sha256(code): {"repo", "guest"}},
 re-set as a whole by `python3 -m onboard` on the Mini; the code itself is
-never stored anywhere but Andrew's registry. A code is SPENT once its repo has
-any direct collaborator or pending invitation, so it needs no state of its own
-here. The comment never says whether a code was known: "received" is the same
-words for a match, a spent code and an unknown one.
+never stored anywhere but Andrew's registry.
 
-GitHub keeps an issue's edit history, readable by anyone who can read the
-issue, so blanking the body hides the code from the page and from search but
-not from that history. That is why a code is worth nothing once it has been
-used, and why an unknown code shown there gives nothing away.
+A code works ONCE. GitHub keeps an issue's edit history, readable by anyone,
+so a code stays public after the body is blanked, and "spent" must hold for
+good. The repo's collaborators and invitations do not: a guest who declines
+the invitation, an invitation withdrawn, or a collaborator removed would put
+the code back in play for whoever read it from that history (review,
+2026-09-19). So every code this job checks is recorded as PRESENTED, in the
+job's own comment (`request_mark`, an HTML comment inside it, written by
+github-actions[bot], which nothing here ever edits or deletes), and a code
+presented once is refused for good, as is one whose repo has any direct
+collaborator or pending invitation. Every checked code is recorded, known or
+not, so the record says nothing about which codes were real. A request that
+fails the format or the rate limit is not checked, so its code is not
+recorded. A code whose invitation never arrived is replaced (`onboard code`).
+
+The comment never says whether a code was known: "received" is the same
+words for a match, a spent code and an unknown one. The run page does show
+it: the app-token and invite steps run only for a match, and step
+conclusions are public. That tells a reader only that a code they already
+saw in an edit history was real, and once checked that code is spent.
 
 Stdlib only: this file is published with the pipeline.
 """
@@ -49,6 +63,10 @@ REDACTED_BODY = "(Removed. Enroll requests are read once and not kept here.)"
 # Issues one account may open here in 24 hours before the rest go unchecked.
 MAX_REQUESTS_PER_DAY = 3
 PERMISSION = "push"  # GitHub's name for write access
+# The only author whose comments here count as this job's record: the app is
+# not installed on this repo, so the job comments with its GITHUB_TOKEN.
+ACTIONS_BOT = "github-actions[bot]"
+MARK_PREFIX = "<!-- willoughby-enroll-request "
 
 RESULTS = ("received", "format", "busy")
 MESSAGES = {
@@ -102,6 +120,22 @@ def lookup(codes: dict, code: str) -> str | None:
     return codes.get(code_hash(code))
 
 
+def request_mark(code: str) -> str:
+    """What the job's comment records about a checked code. Domain-separated
+    from the INVITE_CODES key, though it protects nothing the edit history
+    does not already show."""
+    digest = hashlib.sha256(b"willoughby-enroll-request\n" + enroll_format.normalize_code(code).encode()).hexdigest()
+    return f"{MARK_PREFIX}{digest} -->"
+
+
+def presented_before(client, mark: str) -> bool:
+    """Whether any earlier request here carried this code (the job's own comments only)."""
+    for c in client.paginate(f"/repos/{PIPELINE_REPO}/issues/comments"):
+        if (c.get("user") or {}).get("login") == ACTIONS_BOT and mark in (c.get("body") or ""):
+            return True
+    return False
+
+
 # ----------------------------------------------------------- GitHub steps
 
 
@@ -138,17 +172,36 @@ def issue_fields(event_path: str) -> dict:
             "ISSUE_BODY": issue.get("body") or "", "ISSUE_AUTHOR": (issue.get("user") or {}).get("login") or ""}
 
 
+def comment_body(result: str, mark: str | None = None) -> str:
+    message = MESSAGES.get(result, MESSAGES["received"])
+    return f"{message}\n\n{mark}" if mark else message
+
+
+def comment(client, number, result: str, mark: str | None = None) -> None:
+    client.json("POST", f"{issue_path(number)}/comments", {"body": comment_body(result, mark)})
+
+
 def redeem(client, env: dict, now: dt.datetime) -> tuple[str, str | None]:
-    """(result, repo or None). Blanks the issue before reading anything else."""
-    redact(client, env.get("ISSUE_NUMBER", ""))
+    """(result, repo or None). Blanks the issue before reading anything else,
+    and ends by posting the issue's one comment, which records a checked code."""
+    number = env.get("ISSUE_NUMBER", "")
+    redact(client, number)
     author = env.get("ISSUE_AUTHOR", "")
     try:
         code, login = enroll_format.parse(env.get("ISSUE_TITLE", ""), env.get("ISSUE_BODY", ""), author)
     except enroll_format.EnrollFormatError:
+        comment(client, number, "format")
         return "format", None
     if recent_requests(client, login, now) > MAX_REQUESTS_PER_DAY:
+        comment(client, number, "busy")
         return "busy", None
-    return "received", lookup(load_codes(env.get("INVITE_CODES", "")), code)
+    codes = load_codes(env.get("INVITE_CODES", ""))
+    mark = request_mark(code)
+    repo = None if presented_before(client, mark) else lookup(codes, code)
+    # Posted before the invite step runs, so the code is spent before any
+    # invitation exists; a later request with it finds this comment.
+    comment(client, number, "received", mark)
+    return "received", repo
 
 
 def is_spent(app, repo: str) -> bool:
@@ -182,12 +235,12 @@ def invite(app, repo: str, login: str) -> str:
     return "invited"
 
 
-def finish(client, number, result: str) -> None:
-    message = MESSAGES.get(result, MESSAGES["received"])
+def finish(client, number, result: str, commented: bool = False) -> None:
     path = issue_path(number)
     client.json("PATCH", path, {"title": REDACTED_TITLE, "body": REDACTED_BODY,
                                 "state": "closed", "state_reason": "completed"})
-    client.json("POST", f"{path}/comments", {"body": message})
+    if not commented:
+        comment(client, number, result)
     client.json("PUT", f"{path}/lock", {"lock_reason": "resolved"})
 
 
@@ -199,7 +252,7 @@ def write_outputs(result: str, repo: str | None) -> None:
     if repo:
         # Masked before it can appear anywhere: the next step's inputs are logged.
         print(f"::add-mask::{repo}", flush=True)
-    lines = f"result={result}\nrepo={repo or ''}\n"
+    lines = f"result={result}\nrepo={repo or ''}\ncommented=yes\n"
     if out:
         with open(out, "a") as fh:
             fh.write(lines)
@@ -220,7 +273,8 @@ def main(argv=None) -> int:
         print("done", flush=True)
         return 0
     if cmd == "finish":
-        finish(Client.from_env("GITHUB_TOKEN"), env.get("ISSUE_NUMBER", ""), env.get("RESULT", ""))
+        finish(Client.from_env("GITHUB_TOKEN"), env.get("ISSUE_NUMBER", ""), env.get("RESULT", ""),
+               commented=env.get("COMMENTED", "") == "yes")
         print("issue closed", flush=True)
         return 0
     print("usage: enroll.py redeem|invite|finish", file=sys.stderr)

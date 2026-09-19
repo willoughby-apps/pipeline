@@ -32,6 +32,7 @@ CODE_RE = re.compile(rf"[{ALPHABET}]{{4}}-[{ALPHABET}]{{4}}")
 # GitHub logins: 1 to 39 characters, alphanumerics and single hyphens, not at either end.
 LOGIN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 MAX_BODY = 500
+BOM = "\ufeff"
 
 
 class EnrollFormatError(ValueError):
@@ -65,6 +66,9 @@ def parse(title: str, body: str, author: str) -> tuple[str, str]:
     and the title and body must both name it."""
     if not LOGIN_RE.fullmatch(author or ""):
         raise EnrollFormatError("the issue has no valid author")
+    # Windows PowerShell 5.1's `Set-Content -Encoding UTF8` starts a file with a
+    # byte order mark, which `gh issue create --body-file` may carry into the body.
+    title, body = (title or "").lstrip(BOM), (body or "").lstrip(BOM)
     if len(body or "") > MAX_BODY:
         raise EnrollFormatError("the body is too long to be an enroll request")
     if (title or "").strip().lower() != issue_title(author).lower():

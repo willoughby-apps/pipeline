@@ -2,6 +2,8 @@
 # opens an issue here holding the code and their GitHub username
 # (ci/enroll_format.py). The issue is blanked before anything else is read,
 # answered with one neutral comment, closed and locked, whatever the outcome.
+# That comment is also the record that the code was presented, which spends
+# it for good (ci/enroll.py request_mark), before any invitation is made.
 #
 # The issue text is untrusted and holds the code. The script reads it from the
 # event file ($GITHUB_EVENT_PATH), never from env: a step's env values are
@@ -69,4 +71,5 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           RESULT: ${{ steps.redeem.outputs.result }}
+          COMMENTED: ${{ steps.redeem.outputs.commented }}
         run: python3 ci/enroll.py finish
