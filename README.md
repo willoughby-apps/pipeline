@@ -15,6 +15,8 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 |---|---|---|
 | `poll.yml` | every 5 minutes, or by hand (`dry_run`) | For each guest repo (an org repo with a `bundle_id` custom property), each branch head and `v*` tag without a status from us starts `check.yml` and is marked `pending`. At most 20 checks per guest per UTC day. |
 | `check.yml` | dispatched by `poll.yml`, or by hand, or `workflow_call` | `fetch` → `gate` → `build` → `preview` → `report` → `request` (tags only). |
+| `enroll.yml` | an issue is opened here | Redeems an invite code (`ci/enroll.py`): below. |
+| `setup-smoke.yml` | by hand | Runs the setup skill's non-interactive install commands (Claude Code, git, gh) on clean GitHub-hosted Mac (`macos-26`) and Windows (`windows-2025`) machines and installs the plugin from `willoughby-apps/start` with `claude plugin marketplace add` and `claude plugin install`. No secret, no token, no action. |
 
 `check.yml`'s jobs:
 
@@ -53,6 +55,7 @@ monorepo (with `gate/` and `policy/` copied in from `guest-apps/`), published by
 |---|---|---|
 | `APP_PRIVATE_KEY` (+ variable `APP_CLIENT_ID`) | `poll`, `fetch`, `report`, `request` | the private key of the GitHub App **willoughby-apps-bot** (client ID `Iv23liiTpvQBZ5cbNj7a`, installed on the guest repos only, never this one). Never used directly: each of those jobs mints its own installation token with `actions/create-github-app-token`, **limited to the one guest repo** it works on and to the permissions that job needs (table below), and the token is revoked when the job ends. |
 | `MONOREPO_DISPATCH` | `request` | fine-grained PAT on `ajcohen9/willoughby`: Actions write. |
+| `INVITE_CODES` | `enroll` | JSON `{sha256(code): {"repo", "guest"}}`, re-set as a whole from stdin by `python3 -m onboard` on the Mini (`gh secret set`), never printed. The codes themselves live only in Andrew's registry `~/.config/willoughby-apps/invites.json` (0600). |
 | `PIPELINE_PRIVATE_KEY` | `report` | the age identity for `keys/pipeline.age.pub` (`guest-apps/scripts/pipeline_keypair.sh`). The Mini holds the same key to decrypt the unsigned build. |
 
 The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
@@ -64,11 +67,44 @@ The tokens each job mints (`tests/test_pipeline_workflows.py` pins this table):
 | `fetch` | the one guest repo (`inputs.repo`, validated first) | contents read, metadata read |
 | `report` | the one guest repo | contents write (the previews ref, the commit comment), commit statuses write, metadata read |
 | `request` | the one guest repo | issues write, metadata read |
+| `enroll` | the one guest repo the code names (from `INVITE_CODES`, a masked step output), minted only when the code matched | administration write (inviting a collaborator), metadata read |
 
-The app itself has Administration write (the future enroll job adds
-collaborators with it), but no token minted here asks for it, and no token
-here names this repo, `app-template` or `start`, where the app is not
-installed at all. The pipeline's statuses,
+## Enrolling a guest (`enroll.yml`)
+
+A new guest's `/willoughby-apps:setup CODE` opens an issue here: title
+`Enroll <login>`, body `<!-- willoughby-enroll v1 -->`, `code: XXXX-XXXX`,
+`github: <login>` (`ci/enroll_format.py`). The job, with its own
+`GITHUB_TOKEN` (issues write here, nothing else):
+
+1. **blanks the issue first** (title `Enroll request`, body replaced), then
+   reads the title, body and author from `env:` only; nothing from the issue
+   is printed;
+2. refuses more than 3 issues from one account in 24 hours (counted from this
+   repo's own issues, so no state is kept);
+3. parses the request; the account enrolled is the issue's author
+   (`user.login`, set by GitHub), and a body naming anyone else is refused;
+4. looks up `sha256(code)` in `INVITE_CODES`; an unknown code is dropped
+   quietly;
+5. only on a match, mints an app token for that one guest repo with
+   administration write, and invites the author with push (write) permission
+   unless the code is **spent**: its repo already has a direct collaborator or
+   a pending invitation. Two requests racing with one code both invite; the
+   earliest invitation stays and every other withdraws itself;
+6. always: one comment, the same words whether the code matched, was spent or
+   was unknown, then closes and locks the issue.
+
+The comment is from `github-actions[bot]`, since the app is not installed
+here. GitHub keeps an issue's edit history, readable by anyone, so blanking
+hides the code from the page and from search, not from that history: that is
+why a code is worth nothing once used. If a matched code's invitation fails,
+the code is still unspent and visible in that history, so Andrew mints a new
+one for that guest (`python3 -m onboard code --guest ...`), which replaces
+it. A failed run notifies the issue's author, not Andrew; the guest's Claude
+tells them to send Andrew a message after 10 minutes without an invitation.
+
+The app itself has Administration write, but only the enroll job's token asks
+for it, and no token here names this repo, `app-template` or `start`, where
+the app is not installed at all. The pipeline's statuses,
 comments and issues are therefore written by **`willoughby-apps-bot[bot]`**
 (`ci/ghapi.py BOT_LOGIN`, checked against `GET /users/willoughby-apps-bot[bot]`
 on 2026-09-18: a `Bot`, id 331092058), and that login is what every consumer
@@ -133,8 +169,8 @@ with any other digest.
 
 **No untrusted text in a script.** No `run:` contains `${{ }}`; inputs go
 through `env:` and `ci/ghapi.py validate_inputs` (repo name, 40-hex SHA,
-`push`/`tag`, `vN[.N[.N]]`). Branch names, commit messages and issue text are
-never used at all.
+`push`/`tag`, `vN[.N[.N]]`). Branch names, commit messages and guest-repo issue text are
+never used at all; the enroll issue is read through `env:` only and never printed.
 
 **Only Andrew can push to main.** Every run executes `ci/*.py` from main with
 `PIPELINE_PRIVATE_KEY` and `MONOREPO_DISPATCH` in the environment, so a push to

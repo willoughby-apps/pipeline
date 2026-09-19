@@ -1,0 +1,73 @@
+# Redeem an invite code (ci/enroll.py): a new guest's /willoughby-apps:setup
+# opens an issue here holding the code and their GitHub username
+# (ci/enroll_format.py). The issue is blanked before anything else is read,
+# answered with one neutral comment, closed and locked, whatever the outcome.
+#
+# The issue text is untrusted: it reaches the script through env only, never a
+# `${{ }}` inside run:, and is never printed. The issue's author, set by
+# GitHub, is the account enrolled, never a name in the body.
+#
+# Tokens: this job's own GITHUB_TOKEN (issues write, this repo) for the issue,
+# and, only when the code matched, an app token for that one guest repo with
+# administration write, which is what inviting a collaborator needs. The app
+# is not installed on this repo (README.md), so nothing here asks it for
+# anything but the guest repo. The repo name is a masked step output: the
+# token step's inputs are logged.
+name: enroll
+
+on:
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  enroll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Blank the issue, then read the request
+        id: redeem
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INVITE_CODES: ${{ secrets.INVITE_CODES }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: python3 ci/enroll.py redeem
+
+      - if: steps.redeem.outputs.repo != ''
+        name: App token for that one guest repo (administration write)
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: willoughby-apps
+          repositories: ${{ steps.redeem.outputs.repo }}
+          permission-administration: write
+          permission-metadata: read
+
+      - if: steps.redeem.outputs.repo != ''
+        name: Invite the author unless the code is spent
+        env:
+          APP_TOKEN: ${{ steps.app.outputs.token }}
+          GUEST_REPO: ${{ steps.redeem.outputs.repo }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+        run: python3 ci/enroll.py invite
+
+      - if: always()
+        name: Comment, close and lock
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RESULT: ${{ steps.redeem.outputs.result }}
+        run: python3 ci/enroll.py finish
