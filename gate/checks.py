@@ -428,6 +428,15 @@ class ProjectSpec:
         self.packages: dict = {}  # name -> (url, version, line)
 
 
+def _allowed_target_types(ctx: Context) -> dict:
+    """The default target_types allowlist, plus any extra types Andrew has
+    enabled for this bundle id (policy.yml app.target_types_per_app)."""
+    app_cfg = ctx.policy["app"]
+    allowed = dict(app_cfg["target_types"])
+    allowed.update(app_cfg.get("target_types_per_app", {}).get(ctx.bundle_id, {}) or {})
+    return allowed
+
+
 def check_project_yml(ctx: Context) -> ProjectSpec | None:
     pol = ctx.policy["project_yml"]
     rel = pol["path"]
@@ -513,7 +522,7 @@ def check_project_yml(ctx: Context) -> ProjectSpec | None:
     counts = {}
     for name, t in spec.target_types.items():
         counts[t] = counts.get(t, 0) + 1
-    for ttype, limits in app_cfg["target_types"].items():
+    for ttype, limits in _allowed_target_types(ctx).items():
         n = counts.get(ttype, 0)
         if n < limits["min"] or n > limits["max"]:
             ctx.fail("project_yml.target_type", rel, doc.line_of("targets"),
@@ -672,7 +681,7 @@ def _check_target(ctx, rel, name, target, tline, packages, targets, spec, option
         if key not in pol["allowed_target_keys"] and key not in pol["forbidden_keys"]:
             ctx.fail("project_yml.unknown_key", rel, target.line_of(key), f"{rel}: target {name!r} has key {key!r}.")
     ttype = target.get("type")
-    if ttype not in app_cfg["target_types"]:
+    if ttype not in _allowed_target_types(ctx):
         ctx.fail("project_yml.target_type", rel, target.line_of("type", tline),
                  f"{rel}: target {name!r} has type {ttype!r}, which is not allowed.")
     else:

@@ -23,6 +23,12 @@ app:
     application: {min: 1, max: 1}
     bundle.unit-test: {min: 0, max: 1}
     bundle.ui-testing: {min: 0, max: 1}
+  # Extra target types Andrew has enabled beyond the defaults above, per
+  # approved bundle id. Merged into target_types for that app only; an app
+  # not listed here gets exactly the defaults.
+  target_types_per_app:
+    com.willoughbytools.sam.hello:
+      app-extension: {min: 0, max: 1}
 
 project_yml:
   path: project.yml
@@ -285,7 +291,12 @@ app_icon:
 entitlements:
   # Entitlement keys Andrew has enabled, per approved bundle id. An app not
   # listed here may have no entitlements at all.
-  per_app: {}
+  per_app:
+    com.willoughbytools.sam.hello:
+      - com.apple.developer.healthkit
+      - com.apple.developer.icloud-container-identifiers
+      - com.apple.developer.icloud-services
+      - aps-environment
 
 usage_descriptions:
   # When Swift source matches `api`, the app must declare `key` (a non-empty
